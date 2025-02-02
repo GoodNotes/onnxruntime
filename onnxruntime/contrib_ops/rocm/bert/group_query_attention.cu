@@ -5,7 +5,7 @@
 #include "core/providers/rocm/rocm_common.h"
 #include "core/platform/env_var_utils.h"
 #include "contrib_ops/rocm/bert/group_query_attention.h"
-#include "contrib_ops/rocm/bert/group_query_attention_helper.h"
+#include "contrib_ops/cpu/bert/group_query_attention_helper.h"
 #include "contrib_ops/rocm/bert/rotary_embedding_impl.h"
 #include "contrib_ops/rocm/bert/batched_gemm_softmax_gemm_permute_pipelines.cuh"
 
@@ -115,7 +115,7 @@ Status LaunchSeqlensToPosIds(contrib::GroupQueryAttentionParameters& parameters,
   const int batch_size = parameters.batch_size;
   const int threads = max_threads_per_block;
   const int blocks = (batch_size * seqlen + threads - 1) / threads;
-  if (parameters.is_prompt) {
+  if (parameters.is_first_prompt) {
     SeqlensToPosIdsPrompt<<<blocks, threads, 0, stream>>>(seqlens_k, position_ids, seqlen, batch_size);
   } else {
     SeqlensToPosIdsToken<<<blocks, threads, 0, stream>>>(seqlens_k, position_ids, batch_size);
@@ -325,7 +325,7 @@ Status GroupQueryAttention<T>::ComputeInternal(OpKernelContext* ctx) const {
   // build present kv cache
   auto* present_key_ptr = reinterpret_cast<HipT*>(present_key->MutableDataRaw());
   auto* present_value_ptr = reinterpret_cast<HipT*>(present_value->MutableDataRaw());
-  if (parameters.is_prompt) {
+  if (parameters.is_first_prompt) {
     // copy prompt kv to present kv
     ORT_RETURN_IF_ERROR(LaunchStridedCopy(hip_stream, key_ptr, kv_shape, key_strides.ForBNSHCoord(),
                                           present_key_ptr, present_strides.ForBNSHCoord(), max_thr_per_blk));
@@ -360,7 +360,7 @@ Status GroupQueryAttention<T>::ComputeInternal(OpKernelContext* ctx) const {
         max_thr_per_blk));
 
     // NOTE: ORT: seqlens_k Indicates past sequence lengths for token generation case.
-    // we should call fmha with total sequence lenghts
+    // we should call fmha with total sequence lengths
     seqlens_k_tmp = GetScratchBuffer<int>(batch_size * sizeof(int), ctx->GetComputeStream());
     ORT_RETURN_IF_ERROR(LaunchSeqlensInc(hip_stream, seqlens_k_ptr, seqlens_k_tmp.get(), batch_size, sequence_length));
     seqlens_k_ptr = seqlens_k_tmp.get();
@@ -383,7 +383,7 @@ Status GroupQueryAttention<T>::ComputeInternal(OpKernelContext* ctx) const {
       return ret;
     }
 
-    if (parameters.is_prompt && is_unidirectional_) {
+    if (parameters.is_first_prompt && is_unidirectional_) {
       return mask_info::decode("t", sequence_length, kv_sequence_length);
     }
 
@@ -496,7 +496,7 @@ Status GroupQueryAttention<T>::ComputeInternal(OpKernelContext* ctx) const {
       parameters.head_size,
       parameters.head_size,  // v head size
       GetCkFmhaDataTypeString<T>(),
-      !parameters.is_prompt,  // true,  // is_group_mode
+      !parameters.is_first_prompt,  // true,  // is_group_mode
       true,                   // is_v_rowmajor ? dim is fastest : seq is fastest
       mask.type,
       bias_type,

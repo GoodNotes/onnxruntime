@@ -51,7 +51,7 @@ struct NodeIOInfo {
 
 class GraphEP {
  public:
-  explicit GraphEP(const GraphViewer& graph_viewer);
+  explicit GraphEP(const GraphViewer& graph_viewer, const logging::Logger& logger);
   ~GraphEP() {}
 
   bool Prepare();
@@ -82,7 +82,8 @@ class GraphEP {
 
   void UpdateTensorMap(const std::string& name, const std::shared_ptr<tim::vx::Tensor>& dst_tensor);
 
-  std::shared_ptr<NodeIOInfo> ConstructNodeIO(const std::shared_ptr<tim::vx::Operation>& op, std::vector<NodeArg*> input_arg, std::vector<NodeArg*> output_arg);
+  std::shared_ptr<NodeIOInfo> ConstructNodeIO(const std::shared_ptr<tim::vx::Operation>& op,
+                                              std::vector<NodeArg*> input_arg, std::vector<NodeArg*> output_arg);
 
   bool BindTensors(const std::shared_ptr<NodeIOInfo>& nodeio_info);
 
@@ -103,6 +104,7 @@ class GraphEP {
   // In the form of {input_name, [NodeUnit(s) using the input]}
   std::unordered_map<std::string, std::vector<const NodeUnit*>> all_quantized_op_inputs_;
   const GraphViewer& graph_viewer_;
+  const logging::Logger& logger_;
 
   // Holder for the NodeUnits in the graph, this will guarantee the NodeUnits is
   // valid throughout the lifetime of the ModelBuilder

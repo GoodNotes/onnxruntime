@@ -74,9 +74,6 @@ endif()
 if(onnxruntime_USE_JSEP)
   set(PROVIDERS_JS onnxruntime_providers_js)
 endif()
-if(onnxruntime_USE_QNN)
-  set(PROVIDERS_QNN onnxruntime_providers_qnn)
-endif()
 if(onnxruntime_USE_RKNPU)
   set(PROVIDERS_RKNPU onnxruntime_providers_rknpu)
 endif()
@@ -101,14 +98,14 @@ endif()
 if(onnxruntime_USE_ROCM)
   set(PROVIDERS_ROCM onnxruntime_providers_rocm)
 endif()
-if (onnxruntime_USE_TVM)
-  set(PROVIDERS_TVM onnxruntime_providers_tvm)
-endif()
 if (onnxruntime_USE_XNNPACK)
   set(PROVIDERS_XNNPACK onnxruntime_providers_xnnpack)
 endif()
 if(onnxruntime_USE_WEBNN)
   set(PROVIDERS_WEBNN onnxruntime_providers_webnn)
+endif()
+if(onnxruntime_USE_WEBGPU)
+  set(PROVIDERS_WEBGPU onnxruntime_providers_webgpu)
 endif()
 if (onnxruntime_USE_CANN)
   set(PROVIDERS_CANN onnxruntime_providers_cann)
@@ -151,6 +148,10 @@ if (onnxruntime_USE_WEBNN)
   include(onnxruntime_providers_webnn.cmake)
 endif()
 
+if (onnxruntime_USE_WEBGPU)
+  include(onnxruntime_providers_webgpu.cmake)
+endif()
+
 if (onnxruntime_USE_NNAPI_BUILTIN)
   include(onnxruntime_providers_nnapi.cmake)
 endif()
@@ -187,37 +188,8 @@ if (onnxruntime_USE_ROCM)
   include(onnxruntime_providers_rocm.cmake)
 endif()
 
-if (onnxruntime_USE_TVM)
-  include(onnxruntime_providers_tvm.cmake)
-endif()
-
 if (onnxruntime_USE_VSINPU)
-  add_definitions(-DUSE_VSINPU=1)
-  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-unused-parameter")
-  file(GLOB_RECURSE onnxruntime_providers_vsinpu_srcs
-    "${ONNXRUNTIME_ROOT}/core/providers/vsinpu/builders/*.h"
-    "${ONNXRUNTIME_ROOT}/core/providers/vsinpu/builders/*.cc"
-    "${ONNXRUNTIME_ROOT}/core/providers/vsinpu/*.h"
-    "${ONNXRUNTIME_ROOT}/core/providers/vsinpu/*.cc"
-    "${ONNXRUNTIME_ROOT}/core/providers/shared/utils/utils.h"
-    "${ONNXRUNTIME_ROOT}/core/providers/shared/utils/utils.cc"
-  )
-  source_group(TREE ${ONNXRUNTIME_ROOT}/core FILES ${onnxruntime_providers_vsinpu_srcs})
-  add_library(onnxruntime_providers_vsinpu ${onnxruntime_providers_vsinpu_srcs})
-  onnxruntime_add_include_to_target(onnxruntime_providers_vsinpu
-    onnxruntime_common onnxruntime_framework onnx onnx_proto protobuf::libprotobuf-lite flatbuffers Boost::mp11
-    safeint_interface nsync::nsync_cpp)
-  add_dependencies(onnxruntime_providers_vsinpu ${onnxruntime_EXTERNAL_DEPENDENCIES})
-  set_target_properties(onnxruntime_providers_vsinpu PROPERTIES FOLDER "ONNXRuntime" LINKER_LANGUAGE CXX)
-  target_include_directories(onnxruntime_providers_vsinpu PRIVATE ${ONNXRUNTIME_ROOT} $ENV{TIM_VX_INSTALL}/include)
-
-  find_library(TIMVX_LIBRARY NAMES tim-vx PATHS $ENV{TIM_VX_INSTALL}/lib NO_DEFAULT_PATH)
-  if(TIMVX_LIBRARY)
-    target_link_libraries(onnxruntime_providers_vsinpu PRIVATE ${TIMVX_LIBRARY})
-  else()
-    message(FATAL_ERROR "Cannot find TIM-VX library!")
-  endif()
-
+  include(onnxruntime_providers_vsinpu.cmake)
 endif()
 
 if (onnxruntime_USE_XNNPACK)

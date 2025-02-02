@@ -53,10 +53,14 @@ Status ExpandOpBuilder::AddToModelBuilderImpl(ModelBuilder& model_builder,
   std::vector<int64_t> output_shape;
   ORT_RETURN_IF_NOT(GetBidirectionalBroadcastShape(input_shape, new_shape, output_shape), "Cannot get output shape.");
 
+  emscripten::val options = emscripten::val::object();
+  options.set("label", node.Name());
+
   emscripten::val output =
       model_builder.GetBuilder().call<emscripten::val>("expand",
                                                        input,
-                                                       emscripten::val::array(GetVecUint32FromVecInt64(output_shape)));
+                                                       emscripten::val::array(GetVecUint32FromVecInt64(output_shape)),
+                                                       options);
   model_builder.AddOperand(node.OutputDefs()[0]->Name(), std::move(output));
   return Status::OK();
 }
@@ -84,15 +88,14 @@ bool ExpandOpBuilder::IsOpSupportedImpl(const InitializedTensorSet& initializers
     LOGS(logger, VERBOSE) << "Cannot get shape.";
     return false;
   }
+  if (std::any_of(new_shape.begin(), new_shape.end(), [](int64_t dimension) { return dimension == 0; })) {
+    LOGS(logger, VERBOSE) << "WebNN expand does not support new shape with 0 dimension.";
+    return false;
+  }
 
   std::vector<int64_t> input_shape;
   if (!GetShape(*input_defs[0], input_shape, logger)) {
     LOGS(logger, VERBOSE) << "Cannot get input's shape.";
-    return false;
-  }
-
-  if (input_shape.empty()) {
-    LOGS(logger, VERBOSE) << "Expand does not support empty input's shape.";
     return false;
   }
 

@@ -13,6 +13,7 @@
 #include "core/framework/int4.h"
 #include "core/optimizer/graph_transformer_level.h"
 #include "core/graph/onnx_protobuf.h"
+#include "core/framework/tensorprotoutils.h"
 #include "test/framework/test_utils.h"
 #include "test/common/tensor_op_test_utils.h"
 #include "test/framework/test_utils.h"
@@ -81,7 +82,11 @@ class ModelTestBuilder {
   }
 
   template <typename T>
-  NodeArg* MakeInput(const std::vector<int64_t>& shape, const std::vector<T>& data) {
+  NodeArg* MakeInput(const std::vector<int64_t>& shape, const std::vector<T>& data,
+                     AllocatorPtr allocator = nullptr) {
+    if (!allocator) {
+      allocator = TestCPUExecutionProvider()->CreatePreferredAllocators()[0];
+    }
     ONNX_NAMESPACE::TypeProto type_proto;
     type_proto.mutable_tensor_type()->set_elem_type(utils::ToTensorProtoElementType<T>());
 
@@ -92,7 +97,7 @@ class ModelTestBuilder {
     }
 
     OrtValue input_value;
-    CreateMLValue<T>(TestCPUExecutionProvider()->CreatePreferredAllocators()[0],
+    CreateMLValue<T>(allocator,
                      shape,
                      data,
                      &input_value);
@@ -103,33 +108,19 @@ class ModelTestBuilder {
   }
 
   template <typename T>
-  NodeArg* MakeInput(const std::vector<int64_t>& shape, T min, T max) {
-    return MakeInput<T>(shape, rand_gen_.Uniform<T>(shape, min, max));
+  NodeArg* MakeInput(const std::vector<int64_t>& shape, T min, T max,
+                     AllocatorPtr allocator = nullptr) {
+    return MakeInput<T>(shape, rand_gen_.Uniform<T>(shape, min, max), allocator);
   }
 
-  NodeArg* MakeInputBool(const std::vector<int64_t>& shape) {
+  NodeArg* MakeInputBool(const std::vector<int64_t>& shape,
+                         AllocatorPtr allocator = nullptr) {
     std::vector<uint8_t> data_uint8 = rand_gen_.Uniform<uint8_t>(shape, 0, 1);
     std::vector<bool> data;
     for (uint8_t x : data_uint8) {
       data.push_back(x != 0);
     }
-    return MakeInput<bool>(shape, data);
-  }
-
-  template <typename TInt4>
-  typename std::enable_if<
-      std::is_same_v<TInt4, Int4x2> || std::is_same_v<TInt4, UInt4x2>,
-      NodeArg*>::type
-  MakeInputInt4(const std::vector<int64_t>& shape, typename TInt4::UnpackedType min, typename TInt4::UnpackedType max) {
-    using UnpackedType = typename TInt4::UnpackedType;
-    std::vector<UnpackedType> data_int8 = rand_gen_.Uniform<UnpackedType>(shape, min, max);
-    std::vector<TInt4> data(TInt4::CalcNumInt4Pairs(data_int8.size()));
-    for (size_t i = 0; i < data_int8.size(); i++) {
-      size_t r = i >> 1;
-      size_t c = i & 0x1;
-      data[r].SetElem(c, data_int8[i]);
-    }
-    return MakeInput<TInt4>(shape, data);
+    return MakeInput<bool>(shape, data, allocator);
   }
 
   template <typename T>
@@ -249,7 +240,7 @@ class ModelTestBuilder {
     tensor_proto.set_data_type(utils::ToTensorProtoElementType<bool>());
     std::unique_ptr<bool[]> data_buffer = std::make_unique<bool[]>(data.size());
     for (size_t i = 0; i < data.size(); ++i) data_buffer[i] = data[i];
-    tensor_proto.set_raw_data(data_buffer.get(), data.size());
+    utils::SetRawDataInTensorProto(tensor_proto, data_buffer.get(), data.size());
 
     for (auto& dim : shape) {
       tensor_proto.add_dims(dim);
@@ -339,8 +330,10 @@ class ModelTestBuilder {
                         bool use_ms_domain = false) {
     std::vector<NodeArg*> input_args;
     input_args.push_back(input_arg);
-    input_args.push_back(Make1DInitializer<float>(input_scales));
-    input_args.push_back(Make1DInitializer<T>(input_zero_points));
+
+    std::vector<int64_t> qparams_shape = {static_cast<int64_t>(input_scales.size())};
+    input_args.push_back(MakeInitializer<float>(qparams_shape, input_scales));
+    input_args.push_back(MakeInitializer<T>(qparams_shape, input_zero_points));
 
     std::string domain = use_ms_domain ? kMSDomain : "";
     return AddNode("QuantizeLinear", input_args, {output_arg}, domain, attributes);
@@ -415,8 +408,10 @@ class ModelTestBuilder {
                           bool use_ms_domain = false) {
     std::vector<NodeArg*> input_args;
     input_args.push_back(input_arg);
-    input_args.push_back(Make1DInitializer<float>(input_scales));
-    input_args.push_back(Make1DInitializer<T>(input_zero_points));
+
+    std::vector<int64_t> qparams_shape = {static_cast<int64_t>(input_scales.size())};
+    input_args.push_back(MakeInitializer<float>(qparams_shape, input_scales));
+    input_args.push_back(MakeInitializer<T>(qparams_shape, input_zero_points));
 
     std::string domain = use_ms_domain ? kMSDomain : "";
     return AddNode("DequantizeLinear", input_args, {output_arg}, domain, attributes);
@@ -566,7 +561,8 @@ void TransformerTester(const std::function<void(ModelTestBuilder& helper)>& buil
                        double relative_per_sample_tolerance = 0.0,
                        std::unique_ptr<GraphTransformer> transformer = nullptr,
                        const std::function<void(SessionOptions&)>& add_session_options = {},
-                       const InlinedHashSet<std::string>& disabled_optimizers = {});
+                       const InlinedHashSet<std::string>& disabled_optimizers = {},
+                       std::unique_ptr<IExecutionProvider> ep = nullptr);
 
 void TransformerTester(const std::function<void(ModelTestBuilder& helper)>& build_test_case,
                        const std::function<void(InferenceSessionWrapper& session)>& check_transformed_graph,

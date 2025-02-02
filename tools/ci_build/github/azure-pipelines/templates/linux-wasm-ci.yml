@@ -26,14 +26,14 @@ parameters:
   type: boolean
   default: false
 
+- name: BuildWebGPU
+  type: boolean
+  default: false
+
 # In fact, it's only used on Linux for compiler cache.
 - name: BuildStaticLib
   type: boolean
   default: false
-
-- name: BuildTraining
-  type: boolean
-  default: true
 
 - name: WithCache
   type: boolean
@@ -53,9 +53,6 @@ jobs:
   workspace:
     clean: all
   steps:
-  - task: mspremier.PostBuildCleanup.PostBuildCleanup-task.PostBuildCleanup@3
-    displayName: 'Clean Agent Directories'
-    condition: always()
   - checkout: self
   - task: DownloadPipelineArtifact@2
     inputs:
@@ -77,7 +74,7 @@ jobs:
     displayName: 'Checkout submodules'
   - task: UsePythonVersion@0
     inputs:
-      versionSpec: '3.8'
+      versionSpec: '3.12'
       addToPath: true
       architecture: $(buildArch)
   - template: download-deps.yml
@@ -116,19 +113,6 @@ jobs:
       DisplayName: 'Build and test (browser) (simd + threads)'
       WithCache: ${{ parameters.WithCache }}
 
-  - ${{ if eq(parameters.BuildTraining, true) }}:
-    - template: build-linux-wasm-step.yml
-      parameters:
-        Today: $(Today)
-        ${{ if eq(parameters.BuildStaticLib, true)}}:
-          AdditionalKey: wasm_training | ${{ parameters.BuildConfig }} | static
-        ${{ else }}:
-          AdditionalKey: wasm_training | ${{ parameters.BuildConfig }}
-        CacheDir: $(ORT_CACHE_DIR)/wasm_training
-        Arguments: '$(CommonBuildArgs) --build_dir $(Build.BinariesDirectory)/wasm_training --enable_training_apis --target onnxruntime_webassembly --skip_tests'
-        DisplayName: 'Build (training + simd + threads)'
-        WithCache: ${{ parameters.WithCache }}
-
   - ${{ if eq(parameters.BuildJsep, true) }}:
     - template: build-linux-wasm-step.yml
       parameters:
@@ -142,6 +126,24 @@ jobs:
         DisplayName: 'Build (simd + threads + JSEP)'
         WithCache: ${{ parameters.WithCache }}
 
+  - ${{ if eq(parameters.BuildWebGPU, true) }}:
+    # This step only verifies whether the build is successful.
+    # currently, we uses EMSDK 3.1.59, which is not compatible with Dawn's changes in its Emscripten fork. Closure compiler will not work for WebGPU build.
+    # Only enables in DEBUG build.
+    #
+    # TODO: when upgrading to a newer Emscripten version, we should fix this step.
+    - template: build-linux-wasm-step.yml
+      parameters:
+        Today: $(Today)
+        ${{ if eq(parameters.BuildStaticLib, true)}}:
+          AdditionalKey: wasm_inferencing_webgpu_exp | ${{ parameters.BuildConfig }} | static
+        ${{ else }}:
+          AdditionalKey: wasm_inferencing_webgpu_exp | ${{ parameters.BuildConfig }}
+        CacheDir: $(ORT_CACHE_DIR)/wasm_inferencing_webgpu
+        Arguments: '$(CommonBuildArgs) --build_dir $(Build.BinariesDirectory)/wasm_inferencing_webgpu --use_webgpu --target onnxruntime_webassembly --skip_tests'
+        DisplayName: 'Build (simd + threads + WebGPU experimental)'
+        WithCache: ${{ parameters.WithCache }}
+
   - ${{ if eq(parameters.SkipPublish, false) }}:
     - script: |
         cp $(Build.BinariesDirectory)/wasm_inferencing/${{ parameters.BuildConfig }}/ort-wasm-simd-threaded.wasm $(Build.ArtifactStagingDirectory)
@@ -149,10 +151,6 @@ jobs:
         if [ -d $(Build.BinariesDirectory)/wasm_inferencing_jsep ]; then
           cp $(Build.BinariesDirectory)/wasm_inferencing_jsep/${{ parameters.BuildConfig }}/ort-wasm-simd-threaded.jsep.wasm $(Build.ArtifactStagingDirectory)
           cp $(Build.BinariesDirectory)/wasm_inferencing_jsep/${{ parameters.BuildConfig }}/ort-wasm-simd-threaded.jsep.mjs $(Build.ArtifactStagingDirectory)
-        fi
-        if [ -d $(Build.BinariesDirectory)/wasm_training ]; then
-          cp $(Build.BinariesDirectory)/wasm_training/${{ parameters.BuildConfig }}/ort-training-wasm-simd-threaded.wasm $(Build.ArtifactStagingDirectory)
-          cp $(Build.BinariesDirectory)/wasm_training/${{ parameters.BuildConfig }}/ort-training-wasm-simd-threaded.mjs $(Build.ArtifactStagingDirectory)
         fi
       displayName: 'Create Artifacts'
   - ${{ if eq(parameters.SkipPublish, false) }}:

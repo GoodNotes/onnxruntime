@@ -16,16 +16,16 @@ from test_flash_attn_cuda import (
 import onnxruntime
 
 
-class TestGQA(unittest.TestCase):
+@unittest.skipIf(
+    (not torch.cuda.is_available())
+    or (platform.system() != "Linux")
+    or ("ROCMExecutionProvider" not in onnxruntime.get_available_providers()),
+    reason="ROCm is not available, skipping tests.",
+)
+class TestRocmGQA(unittest.TestCase):
     @parameterized.expand(gqa_no_past_flash_attention_test_cases())
-    def test_gqa_no_past_flash_attention(self, _, config, local, rotary, rotary_interleaved, packed):
+    def test_gqa_no_past_flash_attention(self, _, config, local, rotary, rotary_interleaved, packed, softcap):
         config.ep = "ROCMExecutionProvider"
-        if not torch.cuda.is_available():
-            return
-        if platform.system() != "Linux":
-            return
-        if "CUDAExecutionProvider" in onnxruntime.get_available_providers():
-            return
         print("------- FLASH ATTENTION (PROMPT CASE) --------")
 
         parity_check_gqa_prompt(
@@ -35,8 +35,8 @@ class TestGQA(unittest.TestCase):
             rotary=rotary,
             rotary_interleaved=rotary_interleaved,
             packed=packed,
-            rtol=0.002,
-            atol=0.002,
+            rtol=0.001,
+            atol=0.005,
         )
         parity_check_gqa_prompt_no_buff(
             config,
@@ -45,19 +45,13 @@ class TestGQA(unittest.TestCase):
             rotary=rotary,
             rotary_interleaved=rotary_interleaved,
             packed=packed,
-            rtol=0.002,
-            atol=0.002,
+            rtol=0.001,
+            atol=0.005,
         )
 
     @parameterized.expand(gqa_past_flash_attention_test_cases())
-    def test_gqa_past_flash_attention(self, _, config, local, rotary, rotary_interleaved, packed):
+    def test_gqa_past_flash_attention(self, _, config, local, rotary, rotary_interleaved, packed, softcap):
         config.ep = "ROCMExecutionProvider"
-        if not torch.cuda.is_available():
-            return
-        if platform.system() != "Linux":
-            return
-        if "CUDAExecutionProvider" in onnxruntime.get_available_providers():
-            return
         print("------- FLASH ATTENTION (TOKEN GEN) -------")
 
         parity_check_gqa_past(
@@ -67,8 +61,8 @@ class TestGQA(unittest.TestCase):
             rotary=rotary,
             rotary_interleaved=rotary_interleaved,
             packed=packed,
-            rtol=0.002,
-            atol=0.002,
+            rtol=0.001,
+            atol=0.005,
         )
         parity_check_gqa_past_no_buff(
             config,
@@ -77,8 +71,8 @@ class TestGQA(unittest.TestCase):
             rotary=rotary,
             rotary_interleaved=rotary_interleaved,
             packed=packed,
-            rtol=0.002,
-            atol=0.002,
+            rtol=0.001,
+            atol=0.005,
         )
 
 

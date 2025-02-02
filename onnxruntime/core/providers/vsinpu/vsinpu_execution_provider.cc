@@ -62,6 +62,7 @@ VSINPUExecutionProvider::~VSINPUExecutionProvider() {}
 std::vector<std::unique_ptr<ComputeCapability>>
 VSINPUExecutionProvider::GetCapability(const onnxruntime::GraphViewer& graph_viewer,
                                        const IKernelLookup& /*kernel_lookup*/) const {
+  const auto& logger = *GetLogger();
   std::vector<std::unique_ptr<ComputeCapability>> result;
 
   if (graph_viewer.IsSubgraph()) {
@@ -82,7 +83,7 @@ VSINPUExecutionProvider::GetCapability(const onnxruntime::GraphViewer& graph_vie
   // Get all the NodeUnits in the graph_viewer
   std::vector<std::unique_ptr<NodeUnit>> node_unit_holder;
   std::unordered_map<const Node*, const NodeUnit*> node_unit_map;
-  std::tie(node_unit_holder, node_unit_map) = QDQ::GetAllNodeUnits(graph_viewer);
+  std::tie(node_unit_holder, node_unit_map) = QDQ::GetAllNodeUnits(graph_viewer, logger);
 
   // This holds the result of whether a NodeUnit is supported or not,
   // to prevent nodes in a NodeUnit to be checked for multiple times
@@ -137,9 +138,10 @@ VSINPUExecutionProvider::GetCapability(const onnxruntime::GraphViewer& graph_vie
   std::for_each(result.begin(), result.end(), [&graph_viewer](auto& capability) {
     if (capability && capability->sub_graph && capability->sub_graph->GetMetaDef()) {
       const auto* meta_def = capability->sub_graph->GetMetaDef();
-      bool has_any_non_constant_inputs = std::any_of(meta_def->inputs.begin(), meta_def->inputs.end(), [&graph_viewer](const auto& input) {
-        return !graph_viewer.IsConstantInitializer(input, true);
-      });
+      bool has_any_non_constant_inputs = std::any_of(meta_def->inputs.begin(),
+                                                     meta_def->inputs.end(), [&graph_viewer](const auto& input) {
+                                                       return !graph_viewer.IsConstantInitializer(input, true);
+                                                     });
 
       // ALL inputs are constant
       if (!has_any_non_constant_inputs) {
@@ -173,7 +175,8 @@ VSINPUExecutionProvider::GetCapability(const onnxruntime::GraphViewer& graph_vie
 }
 
 Status ComputeStateFunc(vsi::npu::GraphEP* graph_ep,
-                        OrtKernelContext* context) {
+                        OrtKernelContext* context,
+                        const logging::Logger& logger) {
   Ort::KernelContext ctx(context);
   size_t num_in = ctx.GetInputCount();
   const size_t num_inputs = graph_ep->GetGraphInputs().size();
@@ -184,13 +187,14 @@ Status ComputeStateFunc(vsi::npu::GraphEP* graph_ep,
       const auto tensor_info = onnx_input_tensor.GetTensorTypeAndShapeInfo();
 
       auto origin_tensor = graph_ep->GetGraphInputs()[i]->tensor;
-      origin_tensor->CopyDataToTensor(onnx_input_tensor.GetTensorRawData(), vsi::npu::util::GetTensorBytes(tensor_info));
+      origin_tensor->CopyDataToTensor(onnx_input_tensor.GetTensorRawData(),
+                                      vsi::npu::util::GetTensorBytes(tensor_info));
       j++;
     }
   }
 
   if (!graph_ep->GetGraph()->Run()) {
-    LOGS_DEFAULT(ERROR) << "Failed to run graph.";
+    LOGS(logger, ERROR) << "Failed to run graph.";
   }
   for (size_t i = 0; i < ctx.GetOutputCount(); i++) {
     auto timvx_tensor = graph_ep->GetGraphOutputs()[i]->tensor;
@@ -205,12 +209,14 @@ Status ComputeStateFunc(vsi::npu::GraphEP* graph_ep,
 
 Status VSINPUExecutionProvider::Compile(const std::vector<FusedNodeAndGraph>& fused_nodes_and_graphs,
                                         std::vector<NodeComputeInfo>& node_compute_funcs) {
+  const auto& logger = *GetLogger();
+
   for (const auto& fused_node_graph : fused_nodes_and_graphs) {
     const GraphViewer& graph_viewer = fused_node_graph.filtered_graph;
-    std::shared_ptr<vsi::npu::GraphEP> graph_ep = std::make_shared<vsi::npu::GraphEP>(graph_viewer);
+    std::shared_ptr<vsi::npu::GraphEP> graph_ep = std::make_shared<vsi::npu::GraphEP>(graph_viewer, logger);
 
     for (auto tensor : graph_viewer.GetInputsIncludingInitializers()) {
-      LOGS_DEFAULT(VERBOSE) << "subgraph input init:" << vsi::npu::util::PrintNode(*tensor) << "#"
+      LOGS(logger, VERBOSE) << "subgraph input init:" << vsi::npu::util::PrintNode(*tensor) << "#"
                             << graph_viewer.IsInitializedTensor(tensor->Name());
       auto input = std::make_shared<vsi::npu::GraphIOInfo>();
       input->name = tensor->Name();
@@ -218,7 +224,7 @@ Status VSINPUExecutionProvider::Compile(const std::vector<FusedNodeAndGraph>& fu
       graph_ep->GetGraphInputs().push_back(input);
     }
     for (auto tensor : graph_viewer.GetOutputs()) {
-      LOGS_DEFAULT(VERBOSE) << "subgraph output:" << vsi::npu::util::PrintNode(*tensor);
+      LOGS(logger, VERBOSE) << "subgraph output:" << vsi::npu::util::PrintNode(*tensor);
       auto output = std::make_shared<vsi::npu::GraphIOInfo>();
       output->name = tensor->Name();
       output->is_initializer = false;
@@ -234,16 +240,16 @@ Status VSINPUExecutionProvider::Compile(const std::vector<FusedNodeAndGraph>& fu
       if (node != &node_unit.GetNode()) {
         continue;
       }
-      LOGS_DEFAULT(VERBOSE) << "Adding node: [" << node->OpType() << "]";
+      LOGS(logger, VERBOSE) << "Adding node: [" << node->OpType() << "]";
       vsi::npu::SupportedBuiltinOps().at(node->OpType())->BuildOp(graph_ep.get(), graph_viewer, node_unit);
     }
 
-    LOGS_DEFAULT(INFO) << "Verifying graph";
+    LOGS(logger, INFO) << "Verifying graph";
     graph_ep->GetCompiled() = graph_ep->GetGraph()->Compile();
     if (!graph_ep->GetCompiled()) {
-      LOGS_DEFAULT(ERROR) << "Failed to verify graph.";
+      LOGS(logger, ERROR) << "Failed to verify graph.";
     } else {
-      LOGS_DEFAULT(INFO) << "Graph has been verified successfully.";
+      LOGS(logger, INFO) << "Graph has been verified successfully.";
     }
 
     NodeComputeInfo compute_info;
@@ -256,8 +262,8 @@ Status VSINPUExecutionProvider::Compile(const std::vector<FusedNodeAndGraph>& fu
     compute_info.compute_func =
         [graph_ep, this](FunctionState /*state*/, const OrtApi* /* api */,
                          OrtKernelContext* context) {
-          std::lock_guard<OrtMutex> lock(this->GetMutex());
-          Status res = ComputeStateFunc(graph_ep.get(), context);
+          std::lock_guard<std::mutex> lock(this->GetMutex());
+          Status res = ComputeStateFunc(graph_ep.get(), context, *GetLogger());
           return res;
         };
 
