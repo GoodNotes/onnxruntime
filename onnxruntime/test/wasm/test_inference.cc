@@ -6,7 +6,8 @@
 #include "core/session/onnxruntime_cxx_api.h"
 
 TEST(WebAssemblyTest, test) {
-  auto numIntraOpsThreads = 10;
+  auto numInterOpsThreads = 4;
+  auto numIntraOpsThreads = 4;
   // OrtThreadingOptions *threadingOptions;
   // Ort::SessionOptions sessionOptions;
   // sessionOptions.DisablePerSessionThreads();
