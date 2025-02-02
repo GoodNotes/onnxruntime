@@ -19,7 +19,7 @@ TEST(WebAssemblyTest, test) {
   Ort::GetApi().SetGlobalInterOpNumThreads(envOpts, numInterOpsThreads);
   Ort::GetApi().SetGlobalSpinControl(envOpts, 1);
   Ort::GetApi().CreateEnvWithGlobalThreadPools(ORT_LOGGING_LEVEL_WARNING, "test", envOpts, &environment);
-  env = Ort::Env(environment);
+  Ort::Env ort_env = Ort::Env(environment);
 
   // Ort::Env ort_env;
   Ort::Session session{ort_env, "testdata/mul_1.onnx", Ort::SessionOptions{nullptr}};
