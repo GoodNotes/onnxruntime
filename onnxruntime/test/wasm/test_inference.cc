@@ -6,7 +6,22 @@
 #include "core/session/onnxruntime_cxx_api.h"
 
 TEST(WebAssemblyTest, test) {
-  Ort::Env ort_env;
+  auto numIntraOpsThreads = 10;
+  // OrtThreadingOptions *threadingOptions;
+  // Ort::SessionOptions sessionOptions;
+  // sessionOptions.DisablePerSessionThreads();
+  // Ort::Env ort_env(threadingOptions, ORT_LOGGING_LEVEL_WARNING, "test");
+
+  OrtEnv* environment;
+  OrtThreadingOptions* envOpts = nullptr;
+  Ort::GetApi().CreateThreadingOptions(&envOpts);
+  Ort::GetApi().SetGlobalIntraOpNumThreads(envOpts, numIntraOpsThreads);
+  Ort::GetApi().SetGlobalInterOpNumThreads(envOpts, numInterOpsThreads);
+  Ort::GetApi().SetGlobalSpinControl(envOpts, 1);
+  Ort::GetApi().CreateEnvWithGlobalThreadPools(ORT_LOGGING_LEVEL_WARNING, "test", envOpts, &environment);
+  env = Ort::Env(environment);
+
+  // Ort::Env ort_env;
   Ort::Session session{ort_env, "testdata/mul_1.onnx", Ort::SessionOptions{nullptr}};
   auto memory_info = Ort::MemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeCPU);
 
