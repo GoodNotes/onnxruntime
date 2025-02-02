@@ -196,12 +196,6 @@ function(AddTest)
         )
       else()
         set(TEST_NODE_FLAGS)
-        if (onnxruntime_ENABLE_WEBASSEMBLY_THREADS)
-          list(APPEND TEST_NODE_FLAGS "--experimental-wasm-threads")
-        endif()
-        if (onnxruntime_ENABLE_WEBASSEMBLY_SIMD)
-          list(APPEND TEST_NODE_FLAGS "--experimental-wasm-simd")
-        endif()
 
         # prefer Node from emsdk so the version is more deterministic
         if (DEFINED ENV{EMSDK_NODE})
