@@ -4,11 +4,14 @@ parameters:
   default: false
 - name: download_artifacts_steps
   type: stepList
+- name: stage_name
+  type: string
+  default: 'Publish_NuGet_Package'
 
 stages:
-- stage: Publish_NuGet_Package_And_Report
+- stage: ${{ parameters.stage_name }}
   jobs:
-  - job: Publish_NuGet_Package_And_Report
+  - job: ${{ parameters.stage_name }}
     workspace:
       clean: all
     variables:
@@ -17,9 +20,6 @@ stages:
     pool: 'onnxruntime-Win-CPU-2022'
 
     steps:
-    - task: mspremier.PostBuildCleanup.PostBuildCleanup-task.PostBuildCleanup@3
-      displayName: 'Clean Agent Directories'
-      condition: always()
     # https://learn.microsoft.com/en-us/azure/devops/pipelines/yaml-schema/resources-pipelines-pipeline?view=azure-pipelines#pipeline-resource-metadata-as-predefined-variables
     - script: |
         echo $(resources.pipeline.build.sourceBranch)
@@ -31,7 +31,7 @@ stages:
 
     - task: UsePythonVersion@0
       inputs:
-        versionSpec: '3.9'
+        versionSpec: '3.12'
         addToPath: true
 
     - template: set-version-number-variables-step.yml

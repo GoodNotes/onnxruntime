@@ -1,23 +1,8 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 
-import type {OrtWasmModule} from './wasm-types';
-import {isNode} from './wasm-utils-env';
-
-/**
- * The classic script source URL. This is not always available in non ESModule environments.
- *
- * In Node.js, this is undefined.
- */
-export const scriptSrc =
-    // if Nodejs, return undefined
-    isNode ? undefined :
-             // if It's ESM, use import.meta.url
-             BUILD_DEFS.ESM_IMPORT_META_URL ??
-        // use `document.currentScript.src` if available
-        (typeof document !== 'undefined' ? (document.currentScript as HTMLScriptElement)?.src :
-                                           // use `self.location.href` if available
-                                           (typeof self !== 'undefined' ? self.location?.href : undefined));
+import type { OrtWasmModule } from './wasm-types';
+import { isNode } from './wasm-utils-env';
 
 /**
  * The origin of the current location.
@@ -25,6 +10,56 @@ export const scriptSrc =
  * In Node.js, this is undefined.
  */
 const origin = isNode || typeof location === 'undefined' ? undefined : location.origin;
+
+const getScriptSrc = (): string | undefined => {
+  // if Nodejs, return undefined
+  if (isNode) {
+    return undefined;
+  }
+  // if It's ESM, use import.meta.url
+  if (BUILD_DEFS.IS_ESM) {
+    // For ESM, if the import.meta.url is a file URL, this usually means the bundler rewrites `import.meta.url` to
+    // the file path at compile time. In this case, this file path cannot be used to determine the runtime URL.
+    //
+    // We need to use the URL constructor like this:
+    // ```js
+    // new URL('actual-bundle-name.js', import.meta.url).href
+    // ```
+    // So that bundler can preprocess the URL correctly.
+    if (BUILD_DEFS.ESM_IMPORT_META_URL?.startsWith('file:')) {
+      // if the rewritten URL is a relative path, we need to use the origin to resolve the URL.
+      return new URL(new URL(BUILD_DEFS.BUNDLE_FILENAME, BUILD_DEFS.ESM_IMPORT_META_URL).href, origin).href;
+    }
+
+    return BUILD_DEFS.ESM_IMPORT_META_URL;
+  }
+
+  return typeof document !== 'undefined'
+    ? (document.currentScript as HTMLScriptElement)?.src
+    : // use `self.location.href` if available
+      typeof self !== 'undefined'
+      ? self.location?.href
+      : undefined;
+};
+
+/**
+ * The classic script source URL. This is not always available in non ESModule environments.
+ *
+ * In Node.js, this is undefined.
+ */
+export const scriptSrc = getScriptSrc();
+
+/**
+ * Infer the wasm path prefix from the script source URL.
+ *
+ * @returns The inferred wasm path prefix, or undefined if the script source URL is not available or is a blob URL.
+ */
+export const inferWasmPathPrefixFromScriptSrc = (): string | undefined => {
+  if (scriptSrc && !scriptSrc.startsWith('blob:')) {
+    return scriptSrc.substring(0, scriptSrc.lastIndexOf('/') + 1);
+  }
+  return undefined;
+};
 
 /**
  * Check if the given filename with prefix is from the same origin.
@@ -69,8 +104,8 @@ const fallbackUrl = (filename: string, prefixOverride?: string) => `${prefixOver
  *
  * @returns - A promise that resolves to a new Blob URL
  */
-const preload = async(absoluteUrl: string): Promise<string> => {
-  const response = await fetch(absoluteUrl, {credentials: 'same-origin'});
+const preload = async (absoluteUrl: string): Promise<string> => {
+  const response = await fetch(absoluteUrl, { credentials: 'same-origin' });
   const blob = await response.blob();
   return URL.createObjectURL(blob);
 };
@@ -84,16 +119,17 @@ const preload = async(absoluteUrl: string): Promise<string> => {
  *
  * @returns - A promise that resolves to the default export of the module.
  */
-const dynamicImportDefault = async<T>(url: string): Promise<T> => (await import(/* webpackIgnore: true */ url)).default;
+const dynamicImportDefault = async <T>(url: string): Promise<T> =>
+  (await import(/* webpackIgnore: true */ url)).default;
 
 /**
  * The proxy worker factory imported from the proxy worker module.
  *
  * This is only available when the WebAssembly proxy is not disabled.
  */
-const createProxyWorker: ((urlOverride?: string) => Worker)|undefined =
-    // eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/no-var-requires
-    BUILD_DEFS.DISABLE_WASM_PROXY ? undefined : require('./proxy-worker/main').default;
+const createProxyWorker: ((urlOverride?: string) => Worker) | undefined =
+  // eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/no-var-requires
+  BUILD_DEFS.DISABLE_WASM_PROXY ? undefined : require('./proxy-worker/main').default;
 
 /**
  * Import the proxy worker.
@@ -106,7 +142,7 @@ const createProxyWorker: ((urlOverride?: string) => Worker)|undefined =
  *            - The object URL of the preloaded module, or undefined if no preload is needed.
  *            - The proxy worker.
  */
-export const importProxyWorker = async(): Promise<[undefined | string, Worker]> => {
+export const importProxyWorker = async (): Promise<[undefined | string, Worker]> => {
   if (!scriptSrc) {
     throw new Error('Failed to load proxy worker: cannot determine the script source URL.');
   }
@@ -126,21 +162,21 @@ export const importProxyWorker = async(): Promise<[undefined | string, Worker]> 
  *
  * This is only available in ESM and when embedding is not disabled.
  */
-const embeddedWasmModule: EmscriptenModuleFactory<OrtWasmModule>|undefined =
-    BUILD_DEFS.IS_ESM && BUILD_DEFS.DISABLE_DYNAMIC_IMPORT ?
-    // eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/no-var-requires
-    require(
-        !BUILD_DEFS.DISABLE_TRAINING ? '../../dist/ort-training-wasm-simd-threaded.mjs' :
-            !BUILD_DEFS.DISABLE_JSEP ? '../../dist/ort-wasm-simd-threaded.jsep.mjs' :
-                                       '../../dist/ort-wasm-simd-threaded.mjs')
-        .default :
-    undefined;
+const embeddedWasmModule: EmscriptenModuleFactory<OrtWasmModule> | undefined =
+  BUILD_DEFS.IS_ESM && BUILD_DEFS.ENABLE_BUNDLE_WASM_JS
+    ? // eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/no-var-requires
+      require(
+        !BUILD_DEFS.DISABLE_JSEP
+          ? '../../dist/ort-wasm-simd-threaded.jsep.mjs'
+          : '../../dist/ort-wasm-simd-threaded.mjs',
+      ).default
+    : undefined;
 
 /**
  * Import the WebAssembly module.
  *
  * This function will perform the following steps:
- * 1. If BUILD_DEFS.DISABLE_DYNAMIC_IMPORT is true, use the embedded module.
+ * 1. If the embedded module exists and no custom URL is specified, use the embedded module.
  * 2. If a preload is needed, it will preload the module and return the object URL.
  * 3. Otherwise, it will perform a dynamic import of the module.
  *
@@ -148,15 +184,17 @@ const embeddedWasmModule: EmscriptenModuleFactory<OrtWasmModule>|undefined =
  *            - The object URL of the preloaded module, or undefined if no preload is needed.
  *            - The default export of the module, which is a factory function to create the WebAssembly module.
  */
-export const importWasmModule = async(
-    urlOverride: string|undefined, prefixOverride: string|undefined,
-    isMultiThreaded: boolean): Promise<[undefined | string, EmscriptenModuleFactory<OrtWasmModule>]> => {
-  if (BUILD_DEFS.DISABLE_DYNAMIC_IMPORT) {
-    return [undefined, embeddedWasmModule!];
+export const importWasmModule = async (
+  urlOverride: string | undefined,
+  prefixOverride: string | undefined,
+  isMultiThreaded: boolean,
+): Promise<[undefined | string, EmscriptenModuleFactory<OrtWasmModule>]> => {
+  if (!urlOverride && !prefixOverride && embeddedWasmModule && scriptSrc && isSameOrigin(scriptSrc)) {
+    return [undefined, embeddedWasmModule];
   } else {
-    const wasmModuleFilename = !BUILD_DEFS.DISABLE_TRAINING ? 'ort-training-wasm-simd-threaded.mjs' :
-        !BUILD_DEFS.DISABLE_JSEP                            ? 'ort-wasm-simd-threaded.jsep.mjs' :
-                                                              'ort-wasm-simd-threaded.mjs';
+    const wasmModuleFilename = !BUILD_DEFS.DISABLE_JSEP
+      ? 'ort-wasm-simd-threaded.jsep.mjs'
+      : 'ort-wasm-simd-threaded.mjs';
     const wasmModuleUrl = urlOverride ?? normalizeUrl(wasmModuleFilename, prefixOverride);
     // need to preload if all of the following conditions are met:
     // 1. not in Node.js.
@@ -169,8 +207,9 @@ export const importWasmModule = async(
     // 4. the worker URL is not from the same origin.
     //    - If the worker URL is from the same origin, we can create the worker directly.
     const needPreload = !isNode && isMultiThreaded && wasmModuleUrl && !isSameOrigin(wasmModuleUrl, prefixOverride);
-    const url = needPreload ? (await preload(wasmModuleUrl)) :
-                              (wasmModuleUrl ?? fallbackUrl(wasmModuleFilename, prefixOverride));
+    const url = needPreload
+      ? await preload(wasmModuleUrl)
+      : (wasmModuleUrl ?? fallbackUrl(wasmModuleFilename, prefixOverride));
     return [needPreload ? url : undefined, await dynamicImportDefault<EmscriptenModuleFactory<OrtWasmModule>>(url)];
   }
 };

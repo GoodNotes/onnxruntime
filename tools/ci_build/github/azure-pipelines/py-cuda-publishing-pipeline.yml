@@ -1,7 +1,7 @@
 resources:
   pipelines:
   - pipeline: build
-    source: 'Python-CUDA-Packaging-Pipeline'
+    source: 'Python CUDA12 Package Test Pipeline'
     trigger:
       branches:
         include:
@@ -16,7 +16,7 @@ parameters:
 variables:
   - name: ArtifactFeed
     ${{ if eq(parameters.isReleaseBuild, false) }}:
-      value: ort-cuda-12-nightly
+      value: ORT-Nightly
     ${{ else }}:
       value: onnxruntime-cuda-12
 

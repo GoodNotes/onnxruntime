@@ -5,7 +5,7 @@ import * as esbuild from 'esbuild';
 import minimist from 'minimist';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
-import {SourceMapConsumer, SourceMapGenerator} from 'source-map';
+import { SourceMapConsumer, SourceMapGenerator } from 'source-map';
 
 console.time('BUILD');
 
@@ -27,7 +27,7 @@ const args = minimist(process.argv.slice(2));
  * --bundle-mode=node
  *   Build a single ort-web bundle for nodejs.
  */
-const BUNDLE_MODE: 'prod'|'dev'|'perf'|'node' = args['bundle-mode'] || 'prod';
+const BUNDLE_MODE: 'prod' | 'dev' | 'perf' | 'node' = args['bundle-mode'] || 'prod';
 
 /**
  * --debug
@@ -41,7 +41,7 @@ const BUNDLE_MODE: 'prod'|'dev'|'perf'|'node' = args['bundle-mode'] || 'prod';
  *  Enable debug mode. In this mode, esbuild metafile feature will be enabled. Full bundle analysis will be saved to a
  * file as JSON.
  */
-const DEBUG = args.debug;  // boolean|'verbose'|'save'
+const DEBUG = args.debug; // boolean|'verbose'|'save'
 
 /**
  * Root folder of the source code: `<ORT_ROOT>/js/`
@@ -56,8 +56,7 @@ const DEFAULT_DEFINE = {
   'BUILD_DEFS.DISABLE_JSEP': 'false',
   'BUILD_DEFS.DISABLE_WASM': 'false',
   'BUILD_DEFS.DISABLE_WASM_PROXY': 'false',
-  'BUILD_DEFS.DISABLE_TRAINING': 'true',
-  'BUILD_DEFS.DISABLE_DYNAMIC_IMPORT': 'false',
+  'BUILD_DEFS.ENABLE_BUNDLE_WASM_JS': 'false',
 
   'BUILD_DEFS.IS_ESM': 'false',
   'BUILD_DEFS.ESM_IMPORT_META_URL': 'undefined',
@@ -72,7 +71,7 @@ const COPYRIGHT_HEADER = `/*!
 interface OrtBuildOptions {
   readonly isProduction?: boolean;
   readonly isNode?: boolean;
-  readonly format: 'iife'|'cjs'|'esm';
+  readonly format: 'iife' | 'cjs' | 'esm';
   readonly outputName: string;
   readonly define?: Record<string, string>;
 }
@@ -116,50 +115,45 @@ async function minifyWasmModuleJsForBrowser(filepath: string): Promise<string> {
     const TIME_TAG = `BUILD:terserMinify:${filepath}`;
     console.time(TIME_TAG);
 
-    const contents = await fs.readFile(filepath, {encoding: 'utf-8'});
+    let contents = await fs.readFile(filepath, { encoding: 'utf-8' });
 
-    // Find the first and the only occurrence of minified function implementation of "_emscripten_thread_set_strongref":
-    // ```js
-    // _emscripten_thread_set_strongref: (thread) => {
-    //   if (ENVIRONMENT_IS_NODE) {
-    //     PThread.pthreads[thread].ref();
-    //   }
-    // }
+    // Replace the following line to create worker:
+    // ```
+    // new Worker(new URL(import.meta.url), ...
+    // ```
+    // with:
+    // ```
+    // new Worker(import.meta.url.startsWith('file:')
+    //              ? new URL(BUILD_DEFS.BUNDLE_FILENAME, import.meta.url)
+    //              : new URL(import.meta.url), ...
     // ```
     //
-    // It is minified to: (example)
-    // ```js
-    // function Pb(a){D&&N[a>>>0].ref()}
-    // ```
+    // NOTE: this is a workaround for some bundlers that does not support runtime import.meta.url.
+    // TODO: in emscripten 3.1.61+, need to update this code.
 
-    // The following code will look for the function name and mark the function call as pure, so that Terser will
-    // minify the code correctly.
-
-    const markedAsPure = [];
-    // First, try if we are working on the original (not minified) source file. This is when we are working with the
-    // debug build.
-    const isOriginal = contents.includes('PThread.pthreads[thread].ref()');
-    if (isOriginal) {
-      markedAsPure.push('PThread.pthreads[thread].ref');
-    } else {
-      // If it is not the original source file, we need to find the minified function call.
-      const matches = [...contents.matchAll(/\{[_a-zA-Z][_a-zA-Z0-9]*&&([_a-zA-Z][_a-zA-Z0-9]*\[.+?]\.ref)\(\)}/g)];
-      if (matches.length !== 1) {
-        throw new Error(`Unexpected number of matches for minified "PThread.pthreads[thread].ref()" in "${filepath}": ${
-            matches.length}.`);
-      }
-      // matches[0] is the first and the only match.
-      // matches[0][0] is the full matched string and matches[0][1] is the first capturing group.
-      markedAsPure.push(matches[0][1]);
+    // First, check if there is exactly one occurrence of "new Worker(new URL(import.meta.url)".
+    const matches = [...contents.matchAll(/new Worker\(new URL\(import\.meta\.url\),/g)];
+    if (matches.length !== 1) {
+      throw new Error(
+        `Unexpected number of matches for "new Worker(new URL(import.meta.url)" in "${filepath}": ${matches.length}.`,
+      );
     }
 
+    // Replace the only occurrence.
+    contents = contents.replace(
+      /new Worker\(new URL\(import\.meta\.url\),/,
+      `new Worker(import.meta.url.startsWith('file:')?new URL(BUILD_DEFS.BUNDLE_FILENAME, import.meta.url):new URL(import.meta.url),`,
+    );
+
+    // Use terser to minify the code with special configurations:
+    // - use `global_defs` to define `process` and `globalThis.process` as `undefined`, so terser can tree-shake the
+    //   Node.js specific code.
     const terser = await import('terser');
     const result = await terser.minify(contents, {
       module: true,
       compress: {
         passes: 2,
-        global_defs: {'process': undefined, 'globalThis.process': undefined},
-        pure_funcs: markedAsPure,
+        global_defs: { process: undefined, 'globalThis.process': undefined },
       },
     });
 
@@ -195,8 +189,10 @@ async function buildBundle(options: esbuild.BuildOptions) {
   //   (see: https://github.com/evanw/esbuild/pull/2067#issuecomment-1981642558)
   const NODE_ESM_FIX_MIN = 'import{createRequire}from"module";const require=createRequire(import.meta.url);';
   const banner = {
-    js: options.platform === 'node' && options.format === 'esm' ? COPYRIGHT_HEADER + '\n' + NODE_ESM_FIX_MIN :
-                                                                  COPYRIGHT_HEADER
+    js:
+      options.platform === 'node' && options.format === 'esm'
+        ? COPYRIGHT_HEADER + '\n' + NODE_ESM_FIX_MIN
+        : COPYRIGHT_HEADER,
   };
 
   // Patch footer:
@@ -211,7 +207,7 @@ async function buildBundle(options: esbuild.BuildOptions) {
   // see also: https://github.com/evanw/esbuild/issues/507
   //
   const COMMONJS_FOOTER_MIN = 'typeof exports=="object"&&typeof module=="object"&&(module.exports=ort);';
-  const footer = options.format === 'iife' ? {js: COMMONJS_FOOTER_MIN} : undefined;
+  const footer = options.format === 'iife' ? { js: COMMONJS_FOOTER_MIN } : undefined;
 
   // set BUILD_DEFS for ESM.
   if (options.format === 'esm') {
@@ -229,14 +225,16 @@ async function buildBundle(options: esbuild.BuildOptions) {
     bundle: true,
     banner,
     footer,
-    ...options
+    ...options,
   });
   if (DEBUG) {
     if (DEBUG === 'save') {
       await fs.writeFile(
-          `${path.basename(options.outfile!)}.esbuild.metafile.json`, JSON.stringify(result.metafile!, null, 2));
+        `${path.basename(options.outfile!)}.esbuild.metafile.json`,
+        JSON.stringify(result.metafile!, null, 2),
+      );
     } else {
-      console.log(await esbuild.analyzeMetafile(result.metafile!, {verbose: DEBUG === 'verbose'}));
+      console.log(await esbuild.analyzeMetafile(result.metafile!, { verbose: DEBUG === 'verbose' }));
     }
   }
 }
@@ -246,7 +244,7 @@ async function buildBundle(options: esbuild.BuildOptions) {
  *
  * The distribution code is split into multiple files:
  *  - [output-name][.min].[m]js
- *  - ort[-training]-wasm-simd-threaded[.jsep].mjs
+ *  - ort-wasm-simd-threaded[.jsep].mjs
  */
 async function buildOrt({
   isProduction = false,
@@ -256,35 +254,39 @@ async function buildOrt({
   define = DEFAULT_DEFINE,
 }: OrtBuildOptions) {
   const platform = isNode ? 'node' : 'browser';
-  const external =
-      isNode ? ['onnxruntime-common'] : ['node:fs/promises', 'node:fs', 'node:os', 'module', 'worker_threads'];
+  const external = isNode
+    ? ['onnxruntime-common']
+    : ['node:fs/promises', 'node:fs', 'node:os', 'module', 'worker_threads'];
+  const bundleFilename = `${outputName}${isProduction ? '.min' : ''}.${format === 'esm' ? 'mjs' : 'js'}`;
   const plugins: esbuild.Plugin[] = [];
-  const defineOverride: Record<string, string> = {};
+  const defineOverride: Record<string, string> = {
+    'BUILD_DEFS.BUNDLE_FILENAME': JSON.stringify(bundleFilename),
+  };
   if (!isNode) {
     defineOverride.process = 'undefined';
     defineOverride['globalThis.process'] = 'undefined';
   }
 
-  if (define['BUILD_DEFS.DISABLE_DYNAMIC_IMPORT'] === 'true') {
+  if (define['BUILD_DEFS.ENABLE_BUNDLE_WASM_JS'] === 'true') {
     plugins.push({
       name: 'emscripten-mjs-handler',
       setup(build: esbuild.PluginBuild) {
-        build.onLoad(
-            {filter: /dist[\\/]ort-.*wasm.*\.mjs$/},
-            async args => ({contents: await minifyWasmModuleJsForBrowser(args.path)}));
-      }
+        build.onLoad({ filter: /dist[\\/]ort-.*wasm.*\.mjs$/ }, async (args) => ({
+          contents: await minifyWasmModuleJsForBrowser(args.path),
+        }));
+      },
     });
   }
 
   await buildBundle({
     entryPoints: ['web/lib/index.ts'],
-    outfile: `web/dist/${outputName}${isProduction ? '.min' : ''}.${format === 'esm' ? 'mjs' : 'js'}`,
+    outfile: `web/dist/${bundleFilename}`,
     platform,
     format,
     globalName: 'ort',
     plugins,
     external,
-    define: {...define, ...defineOverride},
+    define: { ...define, ...defineOverride },
     sourcemap: isProduction ? 'linked' : 'inline',
     minify: isProduction,
   });
@@ -306,24 +308,24 @@ async function buildTest() {
     external: ['../../node'],
     plugins: [
       // polyfill nodejs modules
-      require('esbuild-plugin-polyfill-node').polyfillNode({globals: false}),
+      require('esbuild-plugin-polyfill-node').polyfillNode({ globals: false }),
       // make "ort" external
       {
         name: 'make-ort-external',
         setup(build: esbuild.PluginBuild) {
-          build.onResolve(
-              {filter: /^onnxruntime-common$/},
-              _args => ({path: 'onnxruntime-common', namespace: 'make-ort-external'}));
-          build.onLoad(
-              {filter: /.*/, namespace: 'make-ort-external'},
-              _args => ({contents: 'module.exports = globalThis.ort;'}));
-        }
-      }
+          build.onResolve({ filter: /^onnxruntime-common$/ }, (_args) => ({
+            path: 'onnxruntime-common',
+            namespace: 'make-ort-external',
+          }));
+          build.onLoad({ filter: /.*/, namespace: 'make-ort-external' }, (_args) => ({
+            contents: 'module.exports = globalThis.ort;',
+          }));
+        },
+      },
     ],
     minify: isProduction,
   });
 }
-
 
 /**
  * Perform the post-process step after ESBuild finishes the build.
@@ -375,7 +377,9 @@ async function postProcess() {
 
       const jsFileLines = (await fs.readFile(jsFilePath, 'utf-8')).split('\n');
 
-      let line = -1, column = -1, found = false;
+      let line = -1,
+        column = -1,
+        found = false;
       for (let i = 0; i < jsFileLines.length; i++) {
         const importColumnIndex = jsFileLines[i].indexOf(IMPORT_ORIGINAL);
         if (importColumnIndex !== -1) {
@@ -414,9 +418,9 @@ async function postProcess() {
           }
 
           updatedSourceMap.addMapping({
-            generated: {line: mapping.generatedLine, column: mapping.generatedColumn},
+            generated: { line: mapping.generatedLine, column: mapping.generatedColumn },
             source: mapping.source,
-            original: {line: mapping.originalLine, column: mapping.originalColumn},
+            original: { line: mapping.originalLine, column: mapping.originalColumn },
             name: mapping.name,
           });
         });
@@ -427,9 +431,11 @@ async function postProcess() {
         const originalSourcemap = JSON.parse(originalSourcemapString);
         const updatedSourcemap = JSON.parse(updatedSourcemapString);
 
-        if (originalSourcemap.sources.length !== updatedSourcemap.sources.length ||
-            originalSourcemap.sourcesContent.length !== updatedSourcemap.sourcesContent.length ||
-            new Set(originalSourcemap.names).size !== new Set(updatedSourcemap.names).size) {
+        if (
+          originalSourcemap.sources.length !== updatedSourcemap.sources.length ||
+          originalSourcemap.sourcesContent.length !== updatedSourcemap.sourcesContent.length ||
+          new Set(originalSourcemap.names).size !== new Set(updatedSourcemap.names).size
+        ) {
           throw new Error('Failed to update source map: source map length mismatch.');
         }
         const originalMappingsCount = originalSourcemap.mappings.split(/[;,]/);
@@ -444,8 +450,11 @@ async function postProcess() {
       await fs.writeFile(jsFilePath, jsFileLines.join('\n'));
       const newJsFileSize = (await fs.stat(jsFilePath)).size;
       if (newJsFileSize - originalJsFileSize !== IMPORT_MAGIC_COMMENT.length) {
-        throw new Error(`Failed to insert magic comment to file "${file}". Original size: ${
-            originalJsFileSize}, New size: ${newJsFileSize}`);
+        throw new Error(
+          `Failed to insert magic comment to file "${file}". Original size: ${
+            originalJsFileSize
+          }, New size: ${newJsFileSize}`,
+        );
       }
     }
   }
@@ -551,7 +560,7 @@ async function main() {
 
   if (BUNDLE_MODE === 'dev') {
     // ort.all.js
-    await buildOrt({outputName: 'ort.all', format: 'iife', define: {...DEFAULT_DEFINE}});
+    await buildOrt({ outputName: 'ort.all', format: 'iife', define: { ...DEFAULT_DEFINE } });
   }
 
   if (BUNDLE_MODE === 'perf') {
@@ -565,45 +574,52 @@ async function main() {
 
   if (BUNDLE_MODE === 'prod') {
     // ort.all[.min].[m]js
-    await addAllWebBuildTasks({outputName: 'ort.all'});
+    await addAllWebBuildTasks({ outputName: 'ort.all' });
     // ort.all.bundle.min.mjs
     await buildOrt({
       isProduction: true,
       outputName: 'ort.all.bundle',
       format: 'esm',
-      define: {...DEFAULT_DEFINE, 'BUILD_DEFS.DISABLE_DYNAMIC_IMPORT': 'true'},
+      define: { ...DEFAULT_DEFINE, 'BUILD_DEFS.ENABLE_BUNDLE_WASM_JS': 'true' },
     });
 
     // ort[.min].[m]js
     await addAllWebBuildTasks({
       outputName: 'ort',
-      define: {...DEFAULT_DEFINE, 'BUILD_DEFS.DISABLE_JSEP': 'true'},
+      define: { ...DEFAULT_DEFINE, 'BUILD_DEFS.DISABLE_WEBGL': 'true' },
     });
     // ort.bundle.min.mjs
     await buildOrt({
       isProduction: true,
       outputName: 'ort.bundle',
       format: 'esm',
-      define: {...DEFAULT_DEFINE, 'BUILD_DEFS.DISABLE_JSEP': 'true', 'BUILD_DEFS.DISABLE_DYNAMIC_IMPORT': 'true'},
+      define: { ...DEFAULT_DEFINE, 'BUILD_DEFS.DISABLE_WEBGL': 'true', 'BUILD_DEFS.ENABLE_BUNDLE_WASM_JS': 'true' },
     });
 
     // ort.webgpu[.min].[m]js
     await addAllWebBuildTasks({
       outputName: 'ort.webgpu',
-      define: {...DEFAULT_DEFINE, 'BUILD_DEFS.DISABLE_WEBGL': 'true'},
+      define: { ...DEFAULT_DEFINE, 'BUILD_DEFS.DISABLE_WEBGL': 'true' },
     });
     // ort.webgpu.bundle.min.mjs
     await buildOrt({
       isProduction: true,
       outputName: 'ort.webgpu.bundle',
       format: 'esm',
-      define: {...DEFAULT_DEFINE, 'BUILD_DEFS.DISABLE_WEBGL': 'true', 'BUILD_DEFS.DISABLE_DYNAMIC_IMPORT': 'true'},
+      define: { ...DEFAULT_DEFINE, 'BUILD_DEFS.DISABLE_WEBGL': 'true', 'BUILD_DEFS.ENABLE_BUNDLE_WASM_JS': 'true' },
     });
 
     // ort.wasm[.min].[m]js
     await addAllWebBuildTasks({
       outputName: 'ort.wasm',
-      define: {...DEFAULT_DEFINE, 'BUILD_DEFS.DISABLE_JSEP': 'true', 'BUILD_DEFS.DISABLE_WEBGL': 'true'},
+      define: { ...DEFAULT_DEFINE, 'BUILD_DEFS.DISABLE_JSEP': 'true', 'BUILD_DEFS.DISABLE_WEBGL': 'true' },
+    });
+    // ort.wasm.bundle.min.mjs
+    await buildOrt({
+      isProduction: true,
+      outputName: 'ort.wasm.bundle',
+      format: 'esm',
+      define: { ...DEFAULT_DEFINE, 'BUILD_DEFS.DISABLE_JSEP': 'true', 'BUILD_DEFS.DISABLE_WEBGL': 'true' },
     });
     // ort.webgl[.min].[m]js
     await addAllWebBuildTasks({
@@ -613,16 +629,6 @@ async function main() {
         'BUILD_DEFS.DISABLE_JSEP': 'true',
         'BUILD_DEFS.DISABLE_WASM': 'true',
         'BUILD_DEFS.DISABLE_WASM_PROXY': 'true',
-      },
-    });
-    // ort.training.wasm[.min].[m]js
-    await addAllWebBuildTasks({
-      outputName: 'ort.training.wasm',
-      define: {
-        ...DEFAULT_DEFINE,
-        'BUILD_DEFS.DISABLE_TRAINING': 'false',
-        'BUILD_DEFS.DISABLE_JSEP': 'true',
-        'BUILD_DEFS.DISABLE_WEBGL': 'true',
       },
     });
   }

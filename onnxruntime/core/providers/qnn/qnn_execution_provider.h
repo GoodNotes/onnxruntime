@@ -3,30 +3,25 @@
 
 #pragma once
 
-#include "core/framework/execution_provider.h"
-#include "core/framework/session_options.h"
-#include "core/framework/model_metadef_id_generator.h"
-#include "core/graph/model.h"
+#include <memory>
+#include <set>
 #include <string>
+#include <unordered_map>
+#include <vector>
+
+#include "core/providers/qnn/ort_api.h"
 #include "core/providers/qnn/builder/qnn_backend_manager.h"
 #include "core/providers/qnn/builder/qnn_model.h"
 #include "core/providers/qnn/builder/qnn_configs_helper.h"
+#include "core/providers/qnn/rpcmem_library.h"
 #include "HTP/QnnHtpGraph.h"
-#include <vector>
-#include <set>
-#include <unordered_map>
-#ifdef _WIN32
-#include "core/platform/windows/logging/etw_sink.h"
-#endif
 
 namespace onnxruntime {
-
-void RunOnUnload(std::function<void()> function);
 
 // Logical device representation.
 class QNNExecutionProvider : public IExecutionProvider {
  public:
-  explicit QNNExecutionProvider(const ProviderOptions& provider_options_map, const SessionOptions* session_options);
+  explicit QNNExecutionProvider(const ProviderOptions& provider_options_map, const ConfigOptions* config_options);
   virtual ~QNNExecutionProvider();
   ORT_DISALLOW_COPY_ASSIGNMENT_AND_MOVE(QNNExecutionProvider);
 
@@ -52,10 +47,9 @@ class QNNExecutionProvider : public IExecutionProvider {
 
   Status OnRunEnd(bool sync_stream, const onnxruntime::RunOptions& run_options) override;
 
- private:
-  bool IsNodeSupported(qnn::QnnModelWrapper& qnn_model_wrapper, const NodeUnit& node_unit,
-                       const logging::Logger& logger) const;
+  std::vector<AllocatorPtr> CreatePreferredAllocators() override;
 
+ private:
   std::unordered_set<const Node*> GetSupportedNodes(const GraphViewer& graph_viewer,
                                                     const std::unordered_map<const Node*, const NodeUnit*>& node_unit_map,
                                                     const size_t node_unit_size,
@@ -74,24 +68,36 @@ class QNNExecutionProvider : public IExecutionProvider {
 
   qnn::ProfilingLevel GetProfilingLevelFromETWLevel(unsigned char level);
 
+  bool IsHtpSharedMemoryAllocatorAvailable() const { return rpcmem_library_ != nullptr; }
+
  private:
   qnn::HtpGraphFinalizationOptimizationMode htp_graph_finalization_opt_mode_ = qnn::HtpGraphFinalizationOptimizationMode::kDefault;
-  std::unique_ptr<qnn::QnnBackendManager> qnn_backend_manager_;
+  // Note: Using shared_ptr<QnnBackendManager> so that we can refer to it with a weak_ptr from a
+  // HtpSharedMemoryAllocator allocation cleanup callback.
+  std::shared_ptr<qnn::QnnBackendManager> qnn_backend_manager_;
   std::unordered_map<std::string, std::unique_ptr<qnn::QnnModel>> qnn_models_;
   bool context_cache_enabled_ = false;
   std::string context_cache_path_cfg_ = "";
+  std::string context_node_name_prefix_ = "";
   bool disable_cpu_ep_fallback_ = false;  // True if CPU EP fallback has been disabled for this session.
   bool qnn_context_embed_mode_ = true;
   int32_t vtcm_size_in_mb_ = 0;
   std::unique_ptr<onnxruntime::Model> qnn_ep_context_model_;
-  ModelMetadefIdGenerator metadef_id_generator_;
+  std::unique_ptr<ModelMetadefIdGenerator> metadef_id_generator_;
   uint32_t device_id_ = 0;
   qnn::HtpPerformanceMode default_htp_performance_mode_ = qnn::HtpPerformanceMode::kHtpDefault;
   uint32_t default_rpc_control_latency_ = 0;
-  bool enable_HTP_FP16_precision_ = false;
-#ifdef _WIN32
-  onnxruntime::logging::EtwRegistrationManager::EtwInternalCallback callback_ETWSink_provider_;
+  bool enable_HTP_FP16_precision_ = true;
+  bool share_ep_contexts_ = false;
+  bool enable_spill_fill_buffer_ = false;
+#if defined(_WIN32)
+  onnxruntime::logging::EtwRegistrationManager::EtwInternalCallback callback_ETWSink_provider_ = nullptr;
 #endif
+  qnn::ModelSettings model_settings_ = {};
+
+  // Whether this is set depends on a session option enabling it and if the RPCMEM dynamic library is available.
+  // This is potentially shared with HtpSharedMemoryAllocator which may be returned by CreatePreferredAllocators().
+  std::shared_ptr<qnn::RpcMemLibrary> rpcmem_library_ = nullptr;
 
   class PerThreadContext final {
    public:
@@ -140,7 +146,7 @@ class QNNExecutionProvider : public IExecutionProvider {
     std::set<std::weak_ptr<PerThreadContextMap>, std::owner_less<std::weak_ptr<PerThreadContextMap>>>
         caches_to_update_on_destruction;
     // synchronizes access to PerThreadContextState members
-    OrtMutex mutex;
+    std::mutex mutex;
   };
 
   // The execution provider maintains the PerThreadContexts in this structure.

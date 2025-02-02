@@ -3,12 +3,16 @@
 
 #pragma once
 #include <ctime>
+#ifndef USE_CUDA_MINIMAL
 #include <cudnn.h>
-#include <cublas_v2.h>
-
+#else
+typedef void* cudnnHandle_t;
+typedef void* cublasHandle_t;
+typedef void* cudnnStatus_t;
+#endif
 #include "core/providers/tensorrt/nv_includes.h"
 
-#include "core/platform/ort_mutex.h"
+#include <mutex>
 #include "core/providers/cuda/cuda_graph.h"
 #include "tensorrt_execution_provider_info.h"
 
@@ -165,13 +169,12 @@ struct TensorrtFuncState {
   std::vector<std::unordered_map<std::string, size_t>> input_info;
   std::vector<std::unordered_map<std::string, size_t>> output_info;
   std::unordered_map<std::string, std::unordered_map<size_t, std::vector<std::vector<int64_t>>>> input_shape_ranges;
-  OrtMutex* tensorrt_mu_ptr = nullptr;
+  std::mutex* tensorrt_mu_ptr = nullptr;
   bool fp16_enable = false;
   bool int8_enable = false;
   bool int8_calibration_cache_available = false;
   bool dla_enable = false;
   int dla_core = 0;
-  size_t* max_workspace_size_ptr = nullptr;
   std::string trt_node_name_with_precision;
   bool engine_cache_enable = false;
   std::string engine_cache_path;
@@ -211,7 +214,7 @@ struct TensorrtShortFuncState {
   std::vector<std::unordered_map<std::string, size_t>> output_info;
   bool context_memory_sharing_enable = false;
   size_t* max_context_mem_size_ptr = nullptr;
-  OrtMutex* tensorrt_mu_ptr = nullptr;
+  std::mutex* tensorrt_mu_ptr = nullptr;
 };
 
 // Holds important information for building valid ORT graph.
@@ -270,13 +273,12 @@ class TensorrtExecutionProvider : public IExecutionProvider {
   bool IsGraphCaptured(int graph_annotation_id) const override;
   Status ReplayGraph(int graph_annotation_id) override;
 
-  /**
-   * Refit the weight-stripped engine
-   */
   static common::Status RefitEngine(std::string onnx_model_filename,
                                     std::string& onnx_model_folder_path,
                                     std::string& weight_stripped_engine_cath_path,
                                     bool path_check,
+                                    const void* onnx_model_bytestream,
+                                    size_t onnx_model_bytestream_size,
                                     nvinfer1::ICudaEngine* trt_engine,
                                     bool serialize_refitted_engine,
                                     bool detailed_build_log);
@@ -287,7 +289,7 @@ class TensorrtExecutionProvider : public IExecutionProvider {
   cudaStream_t stream_ = nullptr;
   int max_partition_iterations_ = 1000;
   size_t min_subgraph_size_ = 1;
-  size_t max_workspace_size_ = 1 << 30;  // 1GB
+  size_t max_workspace_size_ = 0;
   bool fp16_enable_ = false;
   bool int8_enable_ = false;
   bool dla_enable_ = false;
@@ -301,6 +303,8 @@ class TensorrtExecutionProvider : public IExecutionProvider {
   bool weight_stripped_engine_enable_ = false;
   bool weight_stripped_engine_refit_ = false;
   std::string onnx_model_folder_path_;
+  const void* onnx_model_bytestream_;
+  size_t onnx_model_bytestream_size_;
   bool build_heuristics_enable_ = false;
   bool sparsity_enable_ = false;
   int builder_optimization_level_ = 3;
@@ -308,7 +312,7 @@ class TensorrtExecutionProvider : public IExecutionProvider {
   std::string tactic_sources_;
   std::string global_cache_path_, cache_path_, engine_decryption_lib_path_;
   std::unique_ptr<nvinfer1::IRuntime> runtime_ = nullptr;
-  OrtMutex tensorrt_mu_;
+  std::mutex tensorrt_mu_;
   int device_id_;
   std::string compute_capability_;
   bool context_memory_sharing_enable_ = false;
@@ -325,6 +329,11 @@ class TensorrtExecutionProvider : public IExecutionProvider {
   bool cuda_graph_enable_ = false;
   std::string cache_prefix_;
   bool engine_hw_compatible_ = false;
+  std::string op_types_to_exclude_;
+
+  // The format is as for TENSORRT_VERSION: (MAJOR * 100 + MINOR) * 100 + PATCH
+  int32_t trt_version_;
+  int32_t cuda_version_;
 
   // The OrtAllocator object will be get during ep compute time
   // and should be kept for the lifetime of TRT EP object.
@@ -472,7 +481,7 @@ class TensorrtExecutionProvider : public IExecutionProvider {
     std::set<std::weak_ptr<PerThreadContextMap>, std::owner_less<std::weak_ptr<PerThreadContextMap>>>
         caches_to_update_on_destruction;
     // synchronizes access to PerThreadContextState members
-    OrtMutex mutex;
+    std::mutex mutex;
   };
 
   // The execution provider maintains the PerThreadContexts in this structure.
@@ -505,7 +514,7 @@ class TensorrtExecutionProvider : public IExecutionProvider {
   Every api call not in the thread-safe operations(https://docs.nvidia.com/deeplearning/tensorrt/developer-guide/index.html#threading)
   should be protected by a lock when invoked by multiple threads concurrently.
   */
-  std::unique_lock<OrtMutex> GetApiLock() const;
+  std::unique_lock<std::mutex> GetApiLock() const;
 
   /**Check the graph is the subgraph of control flow op*/
   bool IsSubGraphOfControlFlowOp(const GraphViewer& graph) const;

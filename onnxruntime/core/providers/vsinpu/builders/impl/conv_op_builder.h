@@ -21,6 +21,7 @@
  *    DEALINGS IN THE SOFTWARE.
  *
  *****************************************************************************/
+#pragma once
 #include <string>
 #include <memory>
 #include <vector>
@@ -111,7 +112,7 @@ class ConvOpBuilder : public BaseOpBuilder {
         }
       }
     } else {
-      auto pads = helper.Get("pads", std::vector<uint32_t>{0U, 0U});
+      auto pads = helper.Get("pads", std::vector<uint32_t>{0U, 0U, 0U, 0U});
       if (group != 1 && group != weight_tensor->GetShape()[OChannel_idx]) {
         if (is_1d_conv) {
           op = graph_ep->GetGraph()

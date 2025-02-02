@@ -10,7 +10,7 @@
 #include <unordered_map>
 #include <unordered_set>
 
-#include "core/common/gsl.h"
+#include <gsl/gsl>
 #include "core/framework/data_types.h"
 #include "core/framework/error_code_helper.h"
 #include "core/framework/onnxruntime_typeinfo.h"
@@ -49,7 +49,7 @@ static constexpr uint32_t min_ort_version_with_shape_inference = 17;
 #endif
 
 #if !defined(DISABLE_FLOAT8_TYPES)
-#define SUPPORTED_TENSOR_TYPES DataTypeImpl::AllTensorTypesIRv9()
+#define SUPPORTED_TENSOR_TYPES DataTypeImpl::AllTensorTypesIRv10()
 #else
 #define SUPPORTED_TENSOR_TYPES DataTypeImpl::AllTensorTypesIRv4()
 #endif
@@ -105,6 +105,7 @@ struct OrtShapeInferContext {
       }
     }
     ONNX_NAMESPACE::updateOutputShape(ctx_, index, shape_proto);
+    ONNX_NAMESPACE::updateOutputElemType(ctx_, index, info->type);
     return onnxruntime::Status::OK();
   }
 

@@ -26,28 +26,31 @@ const testArgs = args['test-args'];
 const normalizedTestArgs = !testArgs || Array.isArray(testArgs) ? testArgs : [testArgs];
 
 const files = [
-  {pattern: './model.onnx', included: false},
-  {pattern: './model_with_orig_ext_data.onnx', included: false},
-  {pattern: './model_with_orig_ext_data.bin', included: false},
-  {pattern: './test-wasm-path-override/*', included: false, nocache: true, watched: false},
+  { pattern: './model.onnx', included: false },
+  { pattern: './model_with_orig_ext_data.onnx', included: false },
+  { pattern: './model_with_orig_ext_data.bin', included: false },
+  { pattern: './test-wasm-path-override/*', included: false, nocache: true, watched: false },
 ];
 if (ORT_MAIN) {
   if (ORT_MAIN.endsWith('.mjs')) {
-    files.push(
-        {pattern: (SELF_HOST ? './esm-loaders/' : 'http://localhost:8081/esm-loaders/') + ORT_MAIN, type: 'module'});
+    files.push({
+      pattern: (SELF_HOST ? './esm-loaders/' : 'http://localhost:8081/esm-loaders/') + ORT_MAIN,
+      type: 'module',
+    });
   } else {
-    files.push(
-        {pattern: (SELF_HOST ? './node_modules/onnxruntime-web/dist/' : 'http://localhost:8081/dist/') + ORT_MAIN});
+    files.push({
+      pattern: (SELF_HOST ? './node_modules/onnxruntime-web/dist/' : 'http://localhost:8081/dist/') + ORT_MAIN,
+    });
   }
 }
 if (FORMAT === 'esm') {
-  files.push({pattern: TEST_MAIN, type: 'module'});
+  files.push({ pattern: TEST_MAIN, type: 'module' });
 } else {
-  files.push({pattern: './common.js'}, {pattern: TEST_MAIN});
+  files.push({ pattern: './common.js' }, { pattern: TEST_MAIN });
 }
-files.push({pattern: './dist/**/*', included: false, nocache: true, watched: false});
+files.push({ pattern: './dist/**/*', included: false, nocache: true, watched: false });
 if (SELF_HOST) {
-  files.push({pattern: './node_modules/onnxruntime-web/dist/*.*', included: false, nocache: true});
+  files.push({ pattern: './node_modules/onnxruntime-web/dist/*.*', included: false, nocache: true });
 }
 
 const flags = ['--ignore-gpu-blocklist', '--gpu-vendor-id=0x10de'];
@@ -55,7 +58,11 @@ if (ENABLE_SHARED_ARRAY_BUFFER) {
   flags.push('--enable-features=SharedArrayBuffer');
 }
 
-module.exports = function(config) {
+// In Node.js v16 and below, 'localhost' is using IPv4, so need to listen to '0.0.0.0'
+// In Node.js v17+, 'localhost' is using IPv6, so need to listen to '::'
+const listenAddress = Number.parseInt(process.versions.node.split('.')[0]) >= 17 ? '::' : '0.0.0.0';
+
+module.exports = function (config) {
   config.set({
     frameworks: ['mocha'],
     files,
@@ -66,7 +73,7 @@ module.exports = function(config) {
       '/model_with_orig_ext_data.bin': '/base/model_with_orig_ext_data.bin',
       '/test-wasm-path-override/': '/base/test-wasm-path-override/',
     },
-    client: {captureConsole: true, args: normalizedTestArgs, mocha: {expose: ['body'], timeout: 60000}},
+    client: { captureConsole: true, args: normalizedTestArgs, mocha: { expose: ['body'], timeout: 60000 } },
     reporters: ['mocha'],
     captureTimeout: 120000,
     reportSlowerThan: 100,
@@ -75,16 +82,18 @@ module.exports = function(config) {
     browserDisconnectTolerance: 0,
     browserSocketTimeout: 60000,
     hostname: 'localhost',
+    listenAddress,
     browsers: [],
     customLaunchers: {
-      Chrome_default: {base: 'Chrome', flags, chromeDataDir: USER_DATA},
+      Chrome_default: { base: 'Chrome', flags, chromeDataDir: USER_DATA },
+      Chrome_headless: { base: 'Chrome', flags: ['--headless', ...flags], chromeDataDir: USER_DATA },
       Chrome_no_threads: {
         base: 'Chrome',
         chromeDataDir: USER_DATA,
-        flags
+        flags,
         // TODO: no-thread flags
       },
-      Edge_default: {base: 'Edge', edgeDataDir: USER_DATA}
-    }
+      Edge_default: { base: 'Edge', edgeDataDir: USER_DATA },
+    },
   });
 };

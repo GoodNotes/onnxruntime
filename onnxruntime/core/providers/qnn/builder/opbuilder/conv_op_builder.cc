@@ -1,15 +1,10 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 
-#include "core/providers/common.h"
-#include "core/providers/shared/utils/utils.h"
-#include "core/framework/tensorprotoutils.h"
+#include "core/providers/qnn/builder/opbuilder/base_op_builder.h"
 #include "core/providers/qnn/builder/qnn_model_wrapper.h"
 #include "core/providers/qnn/builder/op_builder_factory.h"
-#include "core/common/safeint.h"
 #include "core/providers/qnn/builder/qnn_utils.h"
-
-#include "base_op_builder.h"
 
 namespace onnxruntime {
 namespace qnn {
@@ -127,7 +122,8 @@ Status ConvOpBuilder::IsOpSupported(QnnModelWrapper& qnn_model_wrapper,
       int32_t elem_data_type = 0;
       ORT_RETURN_IF_ERROR(utils::GetOnnxTensorElemDataType(input_1.node_arg, elem_data_type));
 
-      const bool is_signed_type = (elem_data_type == ONNX_NAMESPACE::TensorProto_DataType_INT8) ||
+      const bool is_signed_type = (elem_data_type == ONNX_NAMESPACE::TensorProto_DataType_INT4) ||
+                                  (elem_data_type == ONNX_NAMESPACE::TensorProto_DataType_INT8) ||
                                   (elem_data_type == ONNX_NAMESPACE::TensorProto_DataType_INT16);
       ORT_RETURN_IF_NOT(is_signed_type, "Conv weights must be of a signed quantized type if quantized per-channel");
 
@@ -210,9 +206,9 @@ Status ConvOpBuilder::ProcessConv2D3DInputs(QnnModelWrapper& qnn_model_wrapper,
 
     // Change shape to HWCN, it could be initializer or normal input
     if (conv_type == OnnxConvType::kConv) {
-      ORT_RETURN_IF_ERROR(NchwShapeToHwcn(input_info.shape, actual_shape));
+      ORT_RETURN_IF_ERROR(NchwShapeToHwcn<uint32_t>(input_info.shape, actual_shape));
     } else if (conv_type == OnnxConvType::kConvTranspose) {
-      ORT_RETURN_IF_ERROR(CnhwShapeToHwcn(input_info.shape, actual_shape));
+      ORT_RETURN_IF_ERROR(CnhwShapeToHwcn<uint32_t>(input_info.shape, actual_shape));
     } else {
       return ORT_MAKE_STATUS(ONNXRUNTIME, FAIL, "QNN EP: Unexpected convolution op type: ", node_unit.OpType().c_str());
     }
@@ -288,9 +284,29 @@ Status ConvOpBuilder::ProcessConv2D3DInputs(QnnModelWrapper& qnn_model_wrapper,
   //
   // Input 2: bias
   //
-  if (num_inputs == 3) {
+  const bool has_bias_input = num_inputs == 3;
+  if (has_bias_input) {
     ORT_RETURN_IF_ERROR(ProcessInput(qnn_model_wrapper, inputs[2], logger, input_names));
   }
+
+#if QNN_API_VERSION_MAJOR == 2 && (QNN_API_VERSION_MINOR >= 16 && QNN_API_VERSION_MINOR <= 18)
+  if (!has_bias_input && IsNpuBackend(qnn_model_wrapper.GetQnnBackendType())) {
+    // Bias is implicit. QNN SDK 2.23/2.24/2.25 (QNN API version 2.16/2.17/2.18) has a validation bug for
+    // implicit bias inputs, so provide an explicit bias of all 0 (quantized int32).
+    TensorInfo input0_info = {};
+    ORT_RETURN_IF_ERROR(qnn_model_wrapper.GetTensorInfo(inputs[0], input0_info));
+
+    TensorInfo input1_info = {};
+    ORT_RETURN_IF_ERROR(qnn_model_wrapper.GetTensorInfo(inputs[1], input1_info));
+
+    if (input0_info.quant_param.IsPerTensor(/*include_bw*/ true) && input1_info.quant_param.IsQuantized()) {
+      const std::string bias_name = qnn::utils::GetNodeName(node_unit) + "_implicit_bias_ort_qnn_ep";
+      std::vector<uint32_t> bias_shape = {input1_info.shape[0]};
+      ORT_RETURN_IF_ERROR(AddZeroBiasInput(qnn_model_wrapper, input0_info.quant_param, input1_info.quant_param,
+                                           std::move(bias_shape), bias_name, logger, input_names));
+    }
+  }
+#endif
 
   return Status::OK();
 }
@@ -392,9 +408,9 @@ Status ConvOpBuilder::ProcessConv1DInputs(QnnModelWrapper& qnn_model_wrapper,
 
     // Create the final shape after the weights are transposed to HWCN.
     if (conv_type == OnnxConvType::kConv) {
-      ORT_RETURN_IF_ERROR(NchwShapeToHwcn(shape_2d, final_shape));
+      ORT_RETURN_IF_ERROR(NchwShapeToHwcn<uint32_t>(shape_2d, final_shape));
     } else if (conv_type == OnnxConvType::kConvTranspose) {
-      ORT_RETURN_IF_ERROR(CnhwShapeToHwcn(shape_2d, final_shape));
+      ORT_RETURN_IF_ERROR(CnhwShapeToHwcn<uint32_t>(shape_2d, final_shape));
     } else {
       return ORT_MAKE_STATUS(ONNXRUNTIME, FAIL, "QNN EP: Unexpected convolution op type: ", node_unit.OpType().c_str());
     }
@@ -413,16 +429,6 @@ Status ConvOpBuilder::ProcessConv1DInputs(QnnModelWrapper& qnn_model_wrapper,
         return static_cast<int64_t>(dim);
       });
 
-      const TensorShape tensor_shape = TensorShape::FromExistingBuffer(shape_2d_int64);  // Does not own shape data.
-      const DataTypeImpl* tensor_dtype = DataTypeImpl::TensorTypeFromONNXEnum(
-                                             input_info.initializer_tensor->data_type())
-                                             ->GetElementType();
-      ORT_RETURN_IF_ERROR(qnn_model_wrapper.UnpackInitializerData(*input_info.initializer_tensor, unpacked_tensor));
-
-      Tensor tensor_2d(tensor_dtype, tensor_shape, unpacked_tensor.data(), OrtMemoryInfo{});  // Does not own data.
-      ONNX_NAMESPACE::TensorProto reshaped_initializer = onnxruntime::utils::TensorToTensorProto(tensor_2d,
-                                                                                                 reshape_output);
-
       // The reshape (unsqueeze) may require us to shift the quant parameter's axis.
       if (input_info.quant_param.IsPerChannel()) {
         ORT_RETURN_IF_ERROR(input_info.quant_param.HandleUnsqueeze<uint32_t>(input_info.shape, shape_2d));
@@ -431,10 +437,21 @@ Status ConvOpBuilder::ProcessConv1DInputs(QnnModelWrapper& qnn_model_wrapper,
       //
       // Get transposed initializer bytes.
       //
+      std::vector<uint8_t> original_tensor_bytes;
+      ORT_RETURN_IF_ERROR(qnn_model_wrapper.UnpackInitializerData(*input_info.initializer_tensor,
+                                                                  original_tensor_bytes));
+      unpacked_tensor.resize(original_tensor_bytes.size());
+      const size_t elem_byte_size = qnn::utils::GetElementSizeByType(
+          static_cast<ONNX_NAMESPACE::TensorProto_DataType>(input_info.initializer_tensor->data_type()));
+      ORT_RETURN_IF(elem_byte_size == 0, "Can't get element byte size from given ONNX type for initializer ",
+                    input1_name.c_str());
+
       if (conv_type == OnnxConvType::kConv) {
-        ORT_RETURN_IF_ERROR(TransposeFromNchwToHwcn(qnn_model_wrapper, reshaped_initializer, unpacked_tensor));
+        ORT_RETURN_IF_ERROR(TransposeFromNchwToHwcn(std::move(shape_2d_int64), elem_byte_size, original_tensor_bytes,
+                                                    unpacked_tensor, /*is_3d*/ false));
       } else if (conv_type == OnnxConvType::kConvTranspose) {
-        ORT_RETURN_IF_ERROR(TransposeFromCnhwToHwcn(qnn_model_wrapper, reshaped_initializer, unpacked_tensor));
+        ORT_RETURN_IF_ERROR(TransposeFromCnhwToHwcn(std::move(shape_2d_int64), elem_byte_size, original_tensor_bytes,
+                                                    unpacked_tensor, /*is_3d*/ false));
       } else {
         return ORT_MAKE_STATUS(ONNXRUNTIME, FAIL, "QNN EP: Unexpected convolution op type: ", node_unit.OpType().c_str());
       }
