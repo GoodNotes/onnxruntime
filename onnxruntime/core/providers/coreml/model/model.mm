@@ -371,6 +371,7 @@ void ProfileComputePlan(NSURL* compileUrl, MLModelConfiguration* config) {
 
 API_AVAILABLE(macos(14.4), ios(17.4))
 void ConfigureOptimizationHints(MLModelConfiguration* config, const CoreMLOptions& coreml_options) {
+    if (@available(macOS 14.4, iOS 17.4, *)) {
 #if HAS_COREMLOPTIMIZATIONHINT
   MLOptimizationHints* optimizationHints = [[MLOptimizationHints alloc] init];
   if (coreml_options.UseStrategy("FastPrediction")) {
@@ -383,6 +384,7 @@ void ConfigureOptimizationHints(MLModelConfiguration* config, const CoreMLOption
     // not set
   }
 #endif
+    }
 }
 
 Status CompileOrReadCachedModel(NSURL* modelUrl, const CoreMLOptions& coreml_options,
