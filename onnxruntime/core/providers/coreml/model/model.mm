@@ -547,10 +547,12 @@ Status Execution::LoadModel() {
       }
 
       // Set the specialization strategy to FastPrediction  for macOS 10.15+
-      if (HAS_COREML8_OR_LATER) {
-        ConfigureOptimizationHints(config, coreml_options_);
-      } else {
-        LOGS(logger_, WARNING) << "iOS 17.4+/macOS 14.4+ or later is required to ConfigureOptimizationHints";
+      if (@available(macOS 14.4, iOS 17.4, *)) {
+          if (HAS_COREML8_OR_LATER) {
+            ConfigureOptimizationHints(config, coreml_options_);
+          } else {
+            LOGS(logger_, WARNING) << "iOS 17.4+/macOS 14.4+ or later is required to ConfigureOptimizationHints";
+          }
       }
 
       if (coreml_options_.ProfileComputePlan()) {
