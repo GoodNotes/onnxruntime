@@ -369,8 +369,9 @@ void ProfileComputePlan(NSURL* compileUrl, MLModelConfiguration* config) {
 #define HAS_COREMLOPTIMIZATIONHINT 0
 #endif
 
-API_AVAILABLE_COREML8
+API_AVAILABLE(macos(14.4), ios(17.4), tvos(17.4), watchos(10.4))
 void ConfigureOptimizationHints(MLModelConfiguration* config, const CoreMLOptions& coreml_options) {
+    if (@available(macOS 14.4, iOS 17.4, *)) {
 #if HAS_COREMLOPTIMIZATIONHINT
   MLOptimizationHints* optimizationHints = [[MLOptimizationHints alloc] init];
   if (coreml_options.UseStrategy("FastPrediction")) {
@@ -383,6 +384,7 @@ void ConfigureOptimizationHints(MLModelConfiguration* config, const CoreMLOption
     // not set
   }
 #endif
+    }
 }
 
 Status CompileOrReadCachedModel(NSURL* modelUrl, const CoreMLOptions& coreml_options,
@@ -547,10 +549,12 @@ Status Execution::LoadModel() {
       }
 
       // Set the specialization strategy to FastPrediction  for macOS 10.15+
-      if (HAS_COREML8_OR_LATER) {
-        ConfigureOptimizationHints(config, coreml_options_);
-      } else {
-        LOGS(logger_, WARNING) << "iOS 17.4+/macOS 14.4+ or later is required to ConfigureOptimizationHints";
+      if (@available(macOS 14.4, iOS 17.4, *)) {
+          if (HAS_COREML8_OR_LATER) {
+            ConfigureOptimizationHints(config, coreml_options_);
+          } else {
+            LOGS(logger_, WARNING) << "iOS 17.4+/macOS 14.4+ or later is required to ConfigureOptimizationHints";
+          }
       }
 
       if (coreml_options_.ProfileComputePlan()) {
