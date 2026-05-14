@@ -10,6 +10,8 @@ BUILD_ARGS=('--config'
             '--skip_submodule_sync'
             '--build_shared_lib'
             '--parallel'
+            '--use_vcpkg'
+            '--use_vcpkg_ms_internal_asset_cache'
             '--use_binskim_compliant_compile_flags'
             '--build_wheel'
             '--enable_onnx_tests'
@@ -21,7 +23,7 @@ BUILD_ARGS=('--config'
             "--enable_pybind"
             "--build_java"
             "--cmake_extra_defines"
-            "CMAKE_CUDA_ARCHITECTURES=86"
+            "CMAKE_CUDA_ARCHITECTURES=80"
             "onnxruntime_BUILD_UNIT_TESTS=ON"
             "onnxruntime_ENABLE_CUDA_EP_INTERNAL_TESTS=ON")
 if [ -x "$(command -v ninja)" ]; then
@@ -34,16 +36,18 @@ else
     BUILD_ARGS+=('--build_dir' 'build')
 fi
 
-if [ -x "$(command -v ccache)" ]; then
-    ccache -s;
-    #BUILD_ARGS+=("--use_cache")
+if command -v ccache &> /dev/null; then
+    ccache --zero-stats
+    BUILD_ARGS+=("--use_cache")
 fi
+
 if [ -f /opt/python/cp312-cp312/bin/python3 ]; then
-    /opt/python/cp312-cp312/bin/python3 tools/ci_build/build.py "${BUILD_ARGS[@]}"
+    PATH=/opt/python/cp312-cp312/bin:$PATH python tools/ci_build/build.py "${BUILD_ARGS[@]}"
 else
     python3 tools/ci_build/build.py "${BUILD_ARGS[@]}"
 fi
-if [ -x "$(command -v ccache)" ]; then
-    ccache -sv
-    ccache -z
+
+if command -v ccache &> /dev/null; then
+    # FIXME: can't use `-vv` for extra details b/c we're shipping with a decrepit version of ccache (3.something) that doesn't support it.
+    ccache --show-stats # -vv
 fi

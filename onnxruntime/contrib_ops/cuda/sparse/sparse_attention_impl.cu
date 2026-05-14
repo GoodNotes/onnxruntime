@@ -7,6 +7,7 @@
 #include "contrib_ops/cuda/bert/group_query_attention_impl.h"
 #include "contrib_ops/cpu/bert/attention_common.h"
 #include "contrib_ops/cuda/bert/attention_impl.h"
+#include "contrib_ops/cuda/bert/attention_kv_cache.h"
 #include "contrib_ops/cuda/sparse/sparse_attention_v1/sparse_attention_common.h"
 #include "contrib_ops/cuda/sparse/sparse_attention_v1/sparse_attention_v1_api.h"
 #include "contrib_ops/cuda/sparse/sparse_attention_v2/sparse_attention_v2_api.h"
@@ -177,14 +178,14 @@ Status QkvToContext(
 
     // Launch rotary embedding kernel. This requires separated Q, K and V
     ORT_RETURN_IF_ERROR(LaunchRotaryEmbeddingKernel<T>(stream, q_buffer, reinterpret_cast<const T*>(query),
-                                                       position_ids_buff, data.cos_cache, data.sin_cache,
+                                                       position_ids_buff, nullptr, data.cos_cache, data.sin_cache,
                                                        parameters.batch_size, parameters.sequence_length,
                                                        parameters.num_heads, parameters.head_size,
                                                        parameters.rotary_dim, parameters.max_rotary_sequence_length,
                                                        /*position_ids_format*/ 1, parameters.rotary_interleaved,
                                                        max_threads_per_block, q_layout));
     ORT_RETURN_IF_ERROR(LaunchRotaryEmbeddingKernel<T>(stream, k_buffer, reinterpret_cast<const T*>(key),
-                                                       position_ids_buff, data.cos_cache, data.sin_cache,
+                                                       position_ids_buff, nullptr, data.cos_cache, data.sin_cache,
                                                        parameters.batch_size, parameters.sequence_length,
                                                        parameters.kv_num_heads, parameters.head_size,
                                                        parameters.rotary_dim, parameters.max_rotary_sequence_length,

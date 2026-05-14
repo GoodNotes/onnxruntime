@@ -3,6 +3,7 @@
 
 #include "core/common/safeint.h"
 #include "core/providers/cuda/cuda_common.h"
+#include "core/providers/cuda/cuda_type_conversion.h"
 #include "moe.h"
 
 using namespace onnxruntime::cuda;
@@ -20,6 +21,7 @@ namespace cuda {
 
 REGISTER_KERNEL_TYPED(float)
 REGISTER_KERNEL_TYPED(MLFloat16)
+REGISTER_KERNEL_TYPED(BFloat16)
 
 template <typename T>
 MoE<T>::MoE(const OpKernelInfo& op_kernel_info) : CudaKernel(op_kernel_info), MoEBase(op_kernel_info) {
@@ -37,19 +39,24 @@ Status MoE<T>::ComputeInternal(OpKernelContext* context) const {
   const Tensor* fc3_experts_bias_optional = context->Input<Tensor>(7);
 
   MoEParameters moe_params;
-  MoEQuantType quant_type = MoEQuantType::None;
-  ORT_RETURN_IF_ERROR(CheckInputs(moe_params, quant_type, input, router_probs, fc1_experts_weights,
-                                  fc1_experts_bias_optional, fc2_experts_weights, fc2_experts_bias_optional,
-                                  fc3_experts_weights_optional, fc3_experts_bias_optional));
+  ORT_RETURN_IF_ERROR(::onnxruntime::contrib::moe_helper::CheckInputs<Tensor>(
+      moe_params, input, router_probs,
+      fc1_experts_weights, fc1_experts_bias_optional, nullptr, nullptr,
+      fc2_experts_weights, fc2_experts_bias_optional, nullptr, nullptr,
+      fc3_experts_weights_optional, fc3_experts_bias_optional, nullptr, nullptr,
+      1,  //  no quantization so pack size is 1
+      activation_type_ == ort_fastertransformer::ActivationType::SwiGLU,
+      0));  // no block-wise quantization for regular MoE
 
-  typedef typename ToCudaType<T>::MappedType CudaT;
-  auto stream = context->GetComputeStream();
-
+  using CudaT = typename OrtToCudaType<T>::type;
   auto& device_prop = GetDeviceProp();
   const int sm = device_prop.major * 10 + device_prop.minor;
 
-  ort_fastertransformer::CutlassMoeFCRunner<CudaT, CudaT> moe_runner(sm, fc3_experts_weights_optional != nullptr,
-                                                                     normalize_routing_weights_, use_sparse_mixer_);
+  ort_fastertransformer::CutlassMoeFCRunner<CudaT, CudaT> moe_runner(sm,
+                                                                     activation_type_,
+                                                                     fc3_experts_weights_optional != nullptr,
+                                                                     normalize_routing_weights_,
+                                                                     use_sparse_mixer_);
 
   size_t ws_size = moe_runner.getWorkspaceSize(
       static_cast<size_t>(moe_params.num_rows), static_cast<size_t>(moe_params.hidden_size),
@@ -59,18 +66,13 @@ Status MoE<T>::ComputeInternal(OpKernelContext* context) const {
   size_t expanded_source_row_to_expanded_dest_row_size = k_ * moe_params.num_rows * sizeof(int);
   size_t expert_for_source_row_size = k_ * moe_params.num_rows * sizeof(int);
 
-  AllocatorPtr allocator;
-  ORT_RETURN_IF_ERROR(context->GetTempSpaceAllocator(&allocator));
-
-  // TODO: allocate one buffer and reuse it.
-  IAllocatorUniquePtr<void> work_space = IAllocator::MakeUniquePtr<void>(allocator, ws_size, false, stream);
-  IAllocatorUniquePtr<void> fc2_output = IAllocator::MakeUniquePtr<void>(allocator, fc2_output_size, false, stream);
-  IAllocatorUniquePtr<void> expert_scales =
-      IAllocator::MakeUniquePtr<void>(allocator, expert_scales_size, false, stream);
+  IAllocatorUniquePtr<void> work_space = this->template GetScratchBuffer<void>(ws_size, this->GetComputeStream(context));
+  IAllocatorUniquePtr<void> fc2_output = this->template GetScratchBuffer<void>(fc2_output_size, this->GetComputeStream(context));
+  IAllocatorUniquePtr<void> expert_scales = this->template GetScratchBuffer<void>(expert_scales_size, this->GetComputeStream(context));
   IAllocatorUniquePtr<void> expanded_source_row_to_expanded_dest_row =
-      IAllocator::MakeUniquePtr<void>(allocator, expanded_source_row_to_expanded_dest_row_size, false, stream);
+      this->template GetScratchBuffer<void>(expanded_source_row_to_expanded_dest_row_size, this->GetComputeStream(context));
   IAllocatorUniquePtr<void> expert_for_source_row =
-      IAllocator::MakeUniquePtr<void>(allocator, expert_for_source_row_size, false, stream);
+      this->template GetScratchBuffer<void>(expert_for_source_row_size, this->GetComputeStream(context));
 
   const CudaT* fc_scales_ptr = nullptr;
 

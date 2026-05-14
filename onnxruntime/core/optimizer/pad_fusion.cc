@@ -9,9 +9,9 @@
 namespace onnxruntime {
 
 bool VerifyNotCastChild(const Node& child_node) {
-  if (!graph_utils::IsSupportedOptypeVersionAndDomain(child_node, "Conv", {1, 11}) &&
-      !graph_utils::IsSupportedOptypeVersionAndDomain(child_node, "AveragePool", {7, 10, 11, 19}) &&
-      !graph_utils::IsSupportedOptypeVersionAndDomain(child_node, "MaxPool", {1, 8, 10, 11, 12})) {
+  if (!graph_utils::IsSupportedOptypeVersionAndDomain(child_node, "Conv", {1, 11, 22}) &&
+      !graph_utils::IsSupportedOptypeVersionAndDomain(child_node, "AveragePool", {7, 10, 11, 19, 22}) &&
+      !graph_utils::IsSupportedOptypeVersionAndDomain(child_node, "MaxPool", {1, 8, 10, 11, 12, 22})) {
     return false;
   }
 
@@ -90,7 +90,7 @@ void UpdatePaddingAttribute(Node& child_node, const std::vector<int64_t>& pads_v
  */
 bool PadFusion::SatisfyCondition(const Graph& graph, const Node& node, const logging::Logger&) const {
   // if Pad has input axis, don't fuse it.
-  if (!graph_utils::IsSupportedOptypeVersionAndDomain(node, "Pad", {1, 2, 11, 13, 18, 19}) ||
+  if (!graph_utils::IsSupportedOptypeVersionAndDomain(node, "Pad", {1, 2, 11, 13, 18, 19, 21, 23, 24, 25}) ||
       node.GetOutputEdgesCount() != 1 ||
       node.InputDefs().size() > 3) {
     return false;
@@ -117,7 +117,7 @@ bool PadFusion::SatisfyCondition(const Graph& graph, const Node& node, const log
     // constant_value should be zero because Conv and MaxPool allow only 0 as padding value.
     if (node.InputDefs().size() > 2) {
       const auto* pad_constant_value_proto = graph_utils::GetConstantInitializer(graph, node.InputDefs()[2]->Name());
-      Initializer pad_constant_value{*pad_constant_value_proto, graph.ModelPath()};
+      Initializer pad_constant_value{graph, *pad_constant_value_proto, graph.ModelPath()};
       if (std::any_of(pad_constant_value.DataAsByteSpan().begin(), pad_constant_value.DataAsByteSpan().end(), [](const uint8_t byte) { return byte != 0; })) {
         return false;
       }
@@ -130,7 +130,7 @@ bool PadFusion::SatisfyCondition(const Graph& graph, const Node& node, const log
   }
 
   const Node& child_node = *node.OutputNodesBegin();
-  if (graph_utils::IsSupportedOptypeVersionAndDomain(child_node, "Cast", {1, 6, 9, 13})) {
+  if (graph_utils::IsSupportedOptypeVersionAndDomain(child_node, "Cast", {1, 6, 9, 13, 19, 21, 23, 24, 25})) {
     if (child_node.GetOutputEdgesCount() != 1) {
       return false;
     }
@@ -152,7 +152,7 @@ Status PadFusion::Apply(Graph& graph, Node& pad_node, RewriteRuleEffect& rule_ef
 
   if (pad_node.SinceVersion() >= 11) {
     const auto* pads_proto = graph_utils::GetConstantInitializer(graph, pad_node.InputDefs()[1]->Name());
-    Initializer pads{*pads_proto, graph.ModelPath()};
+    Initializer pads{graph, *pads_proto, graph.ModelPath()};
     pads_values.assign(pads.DataAsSpan<int64_t>().begin(), pads.DataAsSpan<int64_t>().end());
   } else {
     pads_values.assign(pad_node.GetAttributes().at("pads").ints().begin(), pad_node.GetAttributes().at("pads").ints().end());

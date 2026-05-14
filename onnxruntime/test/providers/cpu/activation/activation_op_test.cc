@@ -72,19 +72,41 @@ constexpr float LeakyReluGrad(float dy, float y, float alpha) {
 #endif
 
 TEST_F(ActivationOpTest, Sigmoid) {
-  TestActivationOp<float>("Sigmoid",
-                          input_values,
-                          [](float x) {
-                            auto y = 1.f / (1.f + std::exp(-std::abs(x)));  // safe sigmoid
-                            y = x > 0 ? y : 1 - y;
-                            return y;
+  auto sigmoid_f32 = [](float x) {
+    auto y = 1.f / (1.f + std::exp(-std::abs(x)));  // safe sigmoid
+    y = x > 0 ? y : 1 - y;
+    return y;
+  };
+  auto sigmoid_f64 = [](double x) {
+    auto y = 1. / (1. + std::exp(-std::abs(x)));  // safe sigmoid
+    y = x > 0 ? y : 1 - y;
+    return y;
+  };
+  // Test sigmoid using the default validator
+  TestActivationOp<float>("Sigmoid", input_values, sigmoid_f32);
+  // Test sigmoid using custom validator to check output range
+  TestActivationOp<float>("Sigmoid", input_values, sigmoid_f32,
+                          {}, {}, true, 7, kOnnxDomain,
+                          [](const std::vector<OrtValue>& fetches, const std::string&) {
+                            const auto& output = fetches[0].Get<Tensor>();
+                            const float* output_data = output.Data<float>();
+                            for (int64_t i = 0; i < output.Shape().Size(); ++i) {
+                              EXPECT_TRUE(output_data[i] >= 0.f && output_data[i] <= 1.f)
+                                  << "Output value out of range: " << output_data[i];
+                            }
                           });
-  TestActivationOp<double>("Sigmoid",
-                           input_values_double,
-                           [](double x) {
-                             auto y = 1. / (1. + std::exp(-std::abs(x)));  // safe sigmoid
-                             y = x > 0 ? y : 1 - y;
-                             return y;
+  // Test sigmoid using the default validator
+  TestActivationOp<double>("Sigmoid", input_values_double, sigmoid_f64);
+  // Test sigmoid using custom validator to check output range
+  TestActivationOp<double>("Sigmoid", input_values_double, sigmoid_f64,
+                           {}, {}, true, 7, kOnnxDomain,
+                           [](const std::vector<OrtValue>& fetches, const std::string&) {
+                             const auto& output = fetches[0].Get<Tensor>();
+                             const double* output_data = output.Data<double>();
+                             for (int64_t i = 0; i < output.Shape().Size(); ++i) {
+                               EXPECT_TRUE(output_data[i] >= 0. && output_data[i] <= 1.)
+                                   << "Output value out of range: " << output_data[i];
+                             }
                            });
 }
 
@@ -98,6 +120,17 @@ TEST_F(ActivationOpTest, HardSigmoid) {
                           },
                           {{"alpha", alpha}, {"beta", beta}});
 }
+
+#if defined(USE_CUDA)
+TEST_F(ActivationOpTest, HardSwish) {
+  TestActivationOp<float>("HardSwish", input_values, [](float x) { return x * std::max(std::min(x / 6.0f + 0.5f, 1.0f), 0.0f); }, {}, {},
+                          /*is_tensorrt_supported=*/false,
+                          /*opset_version= */ 14);
+  TestActivationOp<double>("HardSwish", input_values_double, [](double x) { return x * std::max(std::min(x / 6.0 + 0.5, 1.0), 0.0); }, {}, {},
+                           /*is_tensorrt_supported=*/false,
+                           /*opset_version= */ 14);
+}
+#endif  // USE_CUDA
 
 TEST_F(ActivationOpTest, Tanh) {
   TestActivationOp<float>("Tanh",
@@ -125,7 +158,7 @@ TEST_F(ActivationOpTest, Relu) {
       {}, {},
       /*is_tensorrt_supported=*/false,
       /*opset_version= */ 14);
-#if defined(MLAS_F16VEC_INTRINSICS_SUPPORTED) || defined(COREML_ENABLE_MLPROGRAM)
+#if defined(MLAS_F16VEC_INTRINSICS_SUPPORTED) || defined(USE_COREML)
   TestActivationOp<MLFloat16>(
       "Relu",
       input_values_fp16,
@@ -139,7 +172,7 @@ TEST_F(ActivationOpTest, Relu) {
 #endif  // MLAS_F16VEC_INTRINSICS_SUPPORTED
 }
 
-#if defined(USE_CUDA) || defined(USE_ROCM) || defined(COREML_ENABLE_MLPROGRAM)
+#if defined(USE_CUDA) || defined(USE_COREML)
 TEST_F(ActivationOpTest, Sigmoid_fp16) {
 #ifdef USE_CUDA
   int min_cuda_architecture = 530;
@@ -229,7 +262,7 @@ TEST_F(ActivationOpTest, Relu_fp16) {
 }
 #endif
 
-#if defined(USE_CUDA) || defined(USE_ROCM) || defined(USE_DNNL)
+#if defined(USE_CUDA) || defined(USE_DNNL)
 TEST_F(ActivationOpTest, Sigmoid_bfloat16) {
 #ifdef USE_CUDA
   int min_cuda_architecture = 530;
@@ -266,8 +299,6 @@ TEST_F(ActivationOpTest, Sigmoid_bfloat16) {
   std::vector<std::unique_ptr<IExecutionProvider>> execution_providers;
 #ifdef USE_CUDA
   execution_providers.push_back(DefaultCudaExecutionProvider());
-#elif USE_ROCM
-  execution_providers.push_back(DefaultRocmExecutionProvider());
 #elif USE_DNNL
   execution_providers.push_back(DefaultDnnlExecutionProvider());
 #endif
@@ -306,8 +337,6 @@ TEST_F(ActivationOpTest, Tanh_bfloat16) {
   std::vector<std::unique_ptr<IExecutionProvider>> execution_providers;
 #ifdef USE_CUDA
   execution_providers.push_back(DefaultCudaExecutionProvider());
-#elif USE_ROCM
-  execution_providers.push_back(DefaultRocmExecutionProvider());
 #elif USE_DNNL
   execution_providers.push_back(DefaultDnnlExecutionProvider());
 #endif
@@ -346,18 +375,18 @@ TEST_F(ActivationOpTest, Relu_bfloat16) {
   std::vector<std::unique_ptr<IExecutionProvider>> execution_providers;
 #ifdef USE_CUDA
   execution_providers.push_back(DefaultCudaExecutionProvider());
-#elif USE_ROCM
-  execution_providers.push_back(DefaultRocmExecutionProvider());
 #elif USE_DNNL
   execution_providers.push_back(DefaultDnnlExecutionProvider());
 #endif
   test.Run(OpTester::ExpectResult::kExpectSuccess, "", {}, nullptr, &execution_providers);
 }
-#endif  // USE_CUDA || USE_ROCM || USE_DNNL
+#endif  // USE_CUDA || USE_DNNL
 
 #if defined(USE_DNNL)
 TEST_F(ActivationOpTest, LeakyRelu_bfloat16) {
 #ifdef USE_DNNL
+  DNNL_GTEST_SKIP();
+
   if (!DnnlHasBF16Support()) {
     LOGS_DEFAULT(WARNING) << "Hardware does NOT support BF16";
     return;
@@ -413,7 +442,7 @@ TEST_F(ActivationOpTest, LeakyRelu) {
                           {{"alpha", alpha}}, {});
 }
 
-#if defined(MLAS_F16VEC_INTRINSICS_SUPPORTED) || defined(COREML_ENABLE_MLPROGRAM)
+#if defined(MLAS_F16VEC_INTRINSICS_SUPPORTED) || defined(USE_COREML)
 TEST_F(ActivationOpTest, LeakyRelu_fp16) {
   OpTester test("LeakyRelu", 11);
   float alpha = 0.01f;  // oneDNN set alpha equal to 0.01
@@ -704,13 +733,13 @@ TEST_F(ActivationOpTest, ONNX_Gelu) {
   TestActivationOp<float>(
       "Gelu",
       input_values,
-      [](float x) { return 0.5 * x * (1 + erf(x * M_SQRT1_2)); }, {},
+      [](float x) { return static_cast<float>(0.5 * x * (1 + erf(x * M_SQRT1_2))); }, {},
       {{"approximate", "none"}}, true, 20);
 
   TestActivationOp<float>(
       "Gelu",
       input_values,
-      [](float x) { return 0.5 * x * (1 + erf(x * M_SQRT1_2)); },
+      [](float x) { return static_cast<float>(0.5 * x * (1 + erf(x * M_SQRT1_2))); },
       {},
       {/*default value of approximate attribute is none */}, true, 20);
 
@@ -718,11 +747,63 @@ TEST_F(ActivationOpTest, ONNX_Gelu) {
       "Gelu",
       input_values,
       [](float x) {
-        return 0.5 * x * (1 + tanh(sqrt(2 / M_PI) * (x + 0.044715 * x * x * x)));
+        return static_cast<float>(0.5 * x * (1 + tanh(sqrt(2 / M_PI) * (x + 0.044715 * x * x * x))));
       },
       {},
       {{"approximate", "tanh"}}, true, 20);
 }
+
+#if defined(MLAS_F16VEC_INTRINSICS_SUPPORTED)
+TEST_F(ActivationOpTest, Gelu_fp16_tanh) {
+  OpTester test("Gelu", 20);
+  auto formula = [](float x) {
+    return 0.5f * x * (1 + tanhf(0.7978845608028654f * (x + 0.044715f * x * x * x)));
+  };
+  const std::vector<float> X = {-1.0f, 0, 1.0f, 100.0f, -100.0f, 1000.0f, -1000.0f};
+  std::vector<float> Y;
+  Y.reserve(X.size());
+  for (float x : X) {
+    Y.push_back(formula(x));
+  }
+  std::vector<int64_t> dims{static_cast<int64_t>(X.size())};
+
+  std::vector<MLFloat16> f_X(X.size());
+  std::vector<MLFloat16> f_Y(Y.size());
+  ConvertFloatToMLFloat16(X.data(), f_X.data(), static_cast<int>(X.size()));
+  ConvertFloatToMLFloat16(Y.data(), f_Y.data(), static_cast<int>(Y.size()));
+
+  test.AddInput<MLFloat16>("X", dims, f_X);
+  test.AddOutput<MLFloat16>("Y", dims, f_Y);
+  test.AddAttribute("approximate", "tanh");
+
+  test.Run(OpTester::ExpectResult::kExpectSuccess, "", {kTensorrtExecutionProvider});
+}
+
+TEST_F(ActivationOpTest, Gelu_fp16_erf) {
+  OpTester test("Gelu", 20);
+  auto formula = [](float x) {
+    return static_cast<float>(0.5 * x * (1 + erf(x * M_SQRT1_2)));
+  };
+  const std::vector<float> X = {-1.0f, 0, 1.0f, 100.0f, -100.0f, 1000.0f, -1000.0f};
+  std::vector<float> Y;
+  Y.reserve(X.size());
+  for (float x : X) {
+    Y.push_back(formula(x));
+  }
+  std::vector<int64_t> dims{static_cast<int64_t>(X.size())};
+
+  std::vector<MLFloat16> f_X(X.size());
+  std::vector<MLFloat16> f_Y(Y.size());
+  ConvertFloatToMLFloat16(X.data(), f_X.data(), static_cast<int>(X.size()));
+  ConvertFloatToMLFloat16(Y.data(), f_Y.data(), static_cast<int>(Y.size()));
+
+  test.AddInput<MLFloat16>("X", dims, f_X);
+  test.AddOutput<MLFloat16>("Y", dims, f_Y);
+  test.AddAttribute("approximate", "none");
+
+  test.Run(OpTester::ExpectResult::kExpectSuccess, "", {kTensorrtExecutionProvider});
+}
+#endif
 #endif
 
 }  // namespace test

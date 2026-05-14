@@ -5,6 +5,7 @@
 #include "core/common/safeint.h"
 #include "core/providers/cuda/cuda_common.h"
 #include "contrib_ops/cuda/quantization/moe_quantization.h"
+#include "core/providers/cuda/cuda_type_conversion.h"
 
 using namespace onnxruntime::cuda;
 using namespace ::onnxruntime::common;
@@ -13,16 +14,6 @@ using namespace ONNX_NAMESPACE;
 namespace onnxruntime {
 namespace contrib {
 namespace cuda {
-
-#define REGISTER_KERNEL()                                                                  \
-  ONNX_OPERATOR_KERNEL_EX(QMoE, kMSDomain, 1, kCudaExecutionProvider,                      \
-                          (*KernelDefBuilder::Create())                                    \
-                              .MayInplace(0, 0)                                            \
-                              .TypeConstraint("T", BuildKernelDefConstraints<MLFloat16>()) \
-                              .TypeConstraint("T1", BuildKernelDefConstraints<uint8_t>()), \
-                          QMoE);
-
-REGISTER_KERNEL()
 
 namespace {
 template <typename T, bool use_quint4x2>
@@ -40,38 +31,38 @@ struct ToCudaTypeWrapper<uint8_t, true> {
 
 }  // anonymous namespace
 
-QMoE::QMoE(const OpKernelInfo& op_kernel_info) : CudaKernel(op_kernel_info), MoEBase(op_kernel_info) {
+template <typename T>
+QMoE<T>::QMoE(const OpKernelInfo& op_kernel_info) : CudaKernel(op_kernel_info), MoEBase(op_kernel_info) {
   ORT_ENFORCE(op_kernel_info.GetAttr<int64_t>("expert_weight_bits", &expert_weight_bits_).IsOK());
   ORT_ENFORCE(expert_weight_bits_ == 8 || expert_weight_bits_ == 4,
               "expert_weight_bits must be 4 or 8, but got ", expert_weight_bits_);
+
+  block_size_ = op_kernel_info.GetAttrOrDefault<int64_t>("block_size", 0);
+  ORT_ENFORCE(block_size_ == 0, "block_size is not implemented in qMoE for CUDA.");
 }
 
+template <typename T>
 template <typename CudaWeightT>
-Status QMoE::QuantizedMoEImpl(OpKernelContext* context,
-                              MoEParameters& moe_params,
-                              const Tensor* input,
-                              const Tensor* router_probs,
-                              const Tensor* fc1_experts_weights,
-                              const Tensor* fc1_experts_bias_optional,
-                              const Tensor* fc2_experts_weights,
-                              const Tensor* fc2_experts_bias_optional,
-                              const Tensor* fc3_experts_weights_optional,
-                              const Tensor* fc3_experts_bias_optional,
-                              const Tensor* fc1_scales,
-                              const Tensor* fc2_scales,
-                              const Tensor* fc3_scales_optional,
-                              const cudaDeviceProp& device_prop) const {
-  auto stream = context->GetComputeStream();
-
+Status QMoE<T>::QuantizedMoEImpl(OpKernelContext* context,
+                                 MoEParameters& moe_params,
+                                 const Tensor* input,
+                                 const Tensor* router_probs,
+                                 const Tensor* fc1_experts_weights,
+                                 const Tensor* fc1_experts_bias_optional,
+                                 const Tensor* fc2_experts_weights,
+                                 const Tensor* fc2_experts_bias_optional,
+                                 const Tensor* fc3_experts_weights_optional,
+                                 const Tensor* fc3_experts_bias_optional,
+                                 const Tensor* fc1_scales,
+                                 const Tensor* fc2_scales,
+                                 const Tensor* fc3_scales_optional,
+                                 const cudaDeviceProp& device_prop) const {
   const int sm = device_prop.major * 10 + device_prop.minor;
 
-  AllocatorPtr allocator;
-  ORT_RETURN_IF_ERROR(context->GetTempSpaceAllocator(&allocator));
-
-  using T = MLFloat16;
-  using CudaT = typename ToCudaType<T>::MappedType;
+  using CudaT = typename OrtToCudaType<T>::type;
 
   ort_fastertransformer::CutlassMoeFCRunner<CudaT, CudaWeightT> moe_runner(sm,
+                                                                           activation_type_,
                                                                            fc3_experts_weights_optional != nullptr,
                                                                            normalize_routing_weights_,
                                                                            use_sparse_mixer_);
@@ -85,14 +76,13 @@ Status QMoE::QuantizedMoEImpl(OpKernelContext* context,
   size_t expanded_source_row_to_expanded_dest_row_size = k_ * moe_params.num_rows * sizeof(int);
   size_t expert_for_source_row_size = k_ * moe_params.num_rows * sizeof(int);
 
-  IAllocatorUniquePtr<void> work_space = IAllocator::MakeUniquePtr<void>(allocator, ws_size, false, stream);
-  IAllocatorUniquePtr<void> fc2_output = IAllocator::MakeUniquePtr<void>(allocator, fc2_output_size, false, stream);
-  IAllocatorUniquePtr<void> expert_scales =
-      IAllocator::MakeUniquePtr<void>(allocator, expert_scales_size, false, stream);
+  IAllocatorUniquePtr<void> work_space = this->template GetScratchBuffer<void>(ws_size, this->GetComputeStream(context));
+  IAllocatorUniquePtr<void> fc2_output = this->template GetScratchBuffer<void>(fc2_output_size, this->GetComputeStream(context));
+  IAllocatorUniquePtr<void> expert_scales = this->template GetScratchBuffer<void>(expert_scales_size, this->GetComputeStream(context));
   IAllocatorUniquePtr<void> expanded_source_row_to_expanded_dest_row =
-      IAllocator::MakeUniquePtr<void>(allocator, expanded_source_row_to_expanded_dest_row_size, false, stream);
+      this->template GetScratchBuffer<void>(expanded_source_row_to_expanded_dest_row_size, this->GetComputeStream(context));
   IAllocatorUniquePtr<void> expert_for_source_row =
-      IAllocator::MakeUniquePtr<void>(allocator, expert_for_source_row_size, false, stream);
+      this->template GetScratchBuffer<void>(expert_for_source_row_size, this->GetComputeStream(context));
 
   moe_runner.run_moe_fc(
       reinterpret_cast<const CudaT*>(input->template Data<T>()),
@@ -136,7 +126,8 @@ Status QMoE::QuantizedMoEImpl(OpKernelContext* context,
   return Status::OK();
 }
 
-Status QMoE::ComputeInternal(OpKernelContext* context) const {
+template <typename T>
+Status QMoE<T>::ComputeInternal(OpKernelContext* context) const {
   const Tensor* input = context->Input<Tensor>(0);
   const Tensor* router_probs = context->Input<Tensor>(1);
   const Tensor* fc1_experts_weights = context->Input<Tensor>(2);
@@ -149,20 +140,31 @@ Status QMoE::ComputeInternal(OpKernelContext* context) const {
   const Tensor* fc3_scales_optional = context->Input<Tensor>(9);
   const Tensor* fc3_experts_bias_optional = context->Input<Tensor>(10);
 
-  MoEQuantType quant_type = expert_weight_bits_ == 4 ? MoEQuantType::UINT4 : MoEQuantType::UINT8;
-  MoEParameters moe_params;
-  ORT_RETURN_IF_ERROR(CheckInputs(moe_params, quant_type, input, router_probs, fc1_experts_weights,
-                                  fc1_experts_bias_optional, fc2_experts_weights, fc2_experts_bias_optional,
-                                  fc3_experts_weights_optional, fc3_experts_bias_optional));
-  ORT_RETURN_IF_ERROR(CheckInputScales(fc1_scales, fc2_scales, fc3_scales_optional, moe_params.num_experts,
-                                       moe_params.hidden_size, moe_params.inter_size));
+  const Tensor* fc1_zero_points = context->Input<Tensor>(11);
+  const Tensor* fc2_zero_points = context->Input<Tensor>(12);
+  const Tensor* fc3_zero_points = context->Input<Tensor>(13);
+  const Tensor* router_weights = context->Input<Tensor>(14);
+  ORT_ENFORCE(fc1_zero_points == nullptr && fc2_zero_points == nullptr && fc3_zero_points == nullptr,
+              "Zero points are not yet implemented on CUDA for QMoE.");
+  ORT_ENFORCE(router_weights == nullptr,
+              "Separate router_weights is not yet implemented on CUDA for QMoE.");
 
-#if defined(__GNUC__)
+  MoEParameters moe_params;
+  ORT_RETURN_IF_ERROR(::onnxruntime::contrib::moe_helper::CheckInputs<Tensor>(
+      moe_params, input, router_probs,
+      fc1_experts_weights, fc1_experts_bias_optional, fc1_scales, fc1_zero_points,
+      fc2_experts_weights, fc2_experts_bias_optional, fc2_scales, fc2_zero_points,
+      fc3_experts_weights_optional, fc3_experts_bias_optional, fc3_scales_optional, fc3_zero_points,
+      expert_weight_bits_ == 4 ? 2 : 1,
+      activation_type_ == ort_fastertransformer::ActivationType::SwiGLU,
+      block_size_));
+
+#if defined(__GNUC__) && !defined(__clang__)
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wmaybe-uninitialized"  // Mute "maybe used uninitialized" warning for MoEParameters.
 #endif
 
-  if (quant_type == MoEQuantType::UINT4) {
+  if (expert_weight_bits_ == 4) {
     using CudaWeightT = typename ToCudaTypeWrapper<uint8_t, true>::MappedType;
     return QuantizedMoEImpl<CudaWeightT>(context, moe_params, input, router_probs,
                                          fc1_experts_weights, fc1_experts_bias_optional, fc2_experts_weights,
@@ -178,10 +180,36 @@ Status QMoE::ComputeInternal(OpKernelContext* context) const {
                                          GetDeviceProp());
   }
 
-#if defined(__GNUC__)
+#if defined(__GNUC__) && !defined(__clang__)
 #pragma GCC diagnostic pop
 #endif
 }
+
+ONNX_OPERATOR_TYPED_KERNEL_EX(
+    QMoE,
+    kMSDomain,
+    1,
+    MLFloat16,
+    kCudaExecutionProvider,
+    (*KernelDefBuilder::Create())
+        .MayInplace(0, 0)
+        .TypeConstraint("T", DataTypeImpl::GetTensorType<MLFloat16>())
+        .TypeConstraint("T1", DataTypeImpl::GetTensorType<uint8_t>())
+        .TypeConstraint("T2", DataTypeImpl::GetTensorType<MLFloat16>()),
+    QMoE<MLFloat16>);
+
+ONNX_OPERATOR_TYPED_KERNEL_EX(
+    QMoE,
+    kMSDomain,
+    1,
+    BFloat16,
+    kCudaExecutionProvider,
+    (*KernelDefBuilder::Create())
+        .MayInplace(0, 0)
+        .TypeConstraint("T", DataTypeImpl::GetTensorType<BFloat16>())
+        .TypeConstraint("T1", DataTypeImpl::GetTensorType<uint8_t>())
+        .TypeConstraint("T2", DataTypeImpl::GetTensorType<BFloat16>()),
+    QMoE<BFloat16>);
 
 }  // namespace cuda
 }  // namespace contrib

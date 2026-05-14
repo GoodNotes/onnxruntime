@@ -21,7 +21,16 @@ ConstantFolding::ConstantFolding(const IExecutionProvider& execution_provider,
                                  const ConfigOptions& config_options,
                                  const InlinedHashSet<std::string_view>& compatible_execution_providers,
                                  const InlinedHashSet<std::string>& excluded_initializers) noexcept
-    : GraphTransformer("ConstantFolding", compatible_execution_providers),
+    : ConstantFolding("ConstantFolding", execution_provider, skip_dequantize_linear, config_options, compatible_execution_providers, excluded_initializers) {
+}
+
+ConstantFolding::ConstantFolding(const std::string& name,
+                                 const IExecutionProvider& execution_provider,
+                                 bool skip_dequantize_linear,
+                                 const ConfigOptions& config_options,
+                                 const InlinedHashSet<std::string_view>& compatible_execution_providers,
+                                 const InlinedHashSet<std::string>& excluded_initializers) noexcept
+    : GraphTransformer(name, compatible_execution_providers),
       skip_dequantize_linear_(skip_dequantize_linear),
       config_options_(config_options),
       excluded_initializers_(excluded_initializers),
@@ -86,7 +95,7 @@ static bool ConstantFoldShapeNode(Graph& graph, Node& node) {
     ONNX_NAMESPACE::TensorShapeProto result_shape;
     result_shape.add_dim()->set_dim_value(clamped_slice_length);
     constant_arg_out->SetShape(result_shape);
-    graph.AddInitializedTensor(shape_constant);
+    graph_utils::AddInitializerWithOrtValue(graph, shape_constant);
   }
 
   return is_concrete_shape;  // convert to constant if this is true
@@ -109,7 +118,7 @@ static Status ConstantFoldIfNode(Graph& graph, Node& if_node, const logging::Log
   }
 
   // This is a boolean initializer with a single element.
-  Initializer condition{*initializer};
+  Initializer condition{graph, *initializer};
   ORT_RETURN_IF_NOT(condition.size() == 1, "If node condition initializer: `", condition_def->Name(),
                     "' is expected to have a single boolean element");
 
@@ -144,7 +153,7 @@ Status ConstantFolding::ApplyImpl(Graph& graph, bool& modified, int graph_level,
 
   for (NodeIndex i : order) {
     auto* node = graph.GetNode(i);
-    if (!node) {
+    if (!node || !AllowConstantFolding(*node)) {
       continue;
     }
 
@@ -236,8 +245,32 @@ Status ConstantFolding::ApplyImpl(Graph& graph, bool& modified, int graph_level,
 #endif
 
       std::vector<int> fetch_mlvalue_idxs;
-      for (const auto* node_out : node->OutputDefs()) {
-        fetch_mlvalue_idxs.push_back(info.GetMLValueIndex(node_out->Name()));
+      std::vector<size_t> fetch_to_output_idx;
+      fetch_mlvalue_idxs.reserve(node->OutputDefs().size());
+      fetch_to_output_idx.reserve(node->OutputDefs().size());
+
+      for (size_t output_idx = 0; output_idx < node->OutputDefs().size(); ++output_idx) {
+        const auto* node_out = node->OutputDefs()[output_idx];
+        if (!node_out->Exists()) {
+          continue;
+        }
+
+        const int ort_value_idx = info.GetMLValueIndex(node_out->Name());
+        if (ort_value_idx < 0) {
+          LOGS(logger, INFO) << "Skipping constant folding for " << node->OpType()
+                             << " node '" << node->Name()
+                             << "' because some outputs are not present in the graph.";
+          fetch_mlvalue_idxs.clear();
+          fetch_to_output_idx.clear();
+          break;
+        }
+
+        fetch_mlvalue_idxs.push_back(ort_value_idx);
+        fetch_to_output_idx.push_back(output_idx);
+      }
+
+      if (fetch_mlvalue_idxs.empty()) {
+        continue;
       }
 
       const bool node_on_cpu_ep = node->GetExecutionProviderType() == kCpuExecutionProvider;
@@ -289,10 +322,11 @@ Status ConstantFolding::ApplyImpl(Graph& graph, bool& modified, int graph_level,
 
       // Go over all output node args and substitute them with the newly computed tensors, which will be
       // added to the graph as initializers.
-      ORT_ENFORCE(fetches.size() == node->OutputDefs().size());
+      ORT_ENFORCE(fetches.size() == fetch_to_output_idx.size());
       converted_to_constant = true;
       for (size_t fetch_idx = 0; fetch_idx < fetches.size(); ++fetch_idx) {
-        const auto& constant_arg_out = *node->OutputDefs()[fetch_idx];
+        const auto output_idx = fetch_to_output_idx[fetch_idx];
+        const auto& constant_arg_out = *node->OutputDefs()[output_idx];
         // XXX: Add support for SparseTensors outputs when we have sparse outputs
         if (!utils::HasTensorType(*constant_arg_out.TypeAsProto())) {
           LOGS(logger, INFO) << "Unsupported output type of " << constant_arg_out.Type()
@@ -305,10 +339,15 @@ Status ConstantFolding::ApplyImpl(Graph& graph, bool& modified, int graph_level,
       if (converted_to_constant) {
         for (size_t fetch_idx = 0; fetch_idx < fetches.size(); ++fetch_idx) {
           OrtValue& ort_value = fetches[fetch_idx];
+          const auto output_idx = fetch_to_output_idx[fetch_idx];
           // Build the TensorProto that corresponds to the computed OrtValue and add it as initializer to the graph.
-          auto* constant_arg_out = node->MutableOutputDefs()[fetch_idx];
+          auto* constant_arg_out = node->MutableOutputDefs()[output_idx];
           const Tensor& out_tensor = ort_value.Get<Tensor>();
-          ONNX_NAMESPACE::TensorProto out_tensorproto = utils::TensorToTensorProto(out_tensor, constant_arg_out->Name());
+          constexpr const bool use_tensor_buffer_true = true;
+          ONNX_NAMESPACE::TensorProto out_tensorproto = utils::TensorToTensorProto(
+              out_tensor,
+              constant_arg_out->Name(),
+              use_tensor_buffer_true);
 
           ONNX_NAMESPACE::TensorShapeProto result_shape;
           for (auto& dim : out_tensor.Shape().GetDims()) {
@@ -316,7 +355,12 @@ Status ConstantFolding::ApplyImpl(Graph& graph, bool& modified, int graph_level,
           }
 
           constant_arg_out->SetShape(result_shape);
-          graph.AddInitializedTensor(out_tensorproto);
+          // The data is too small and has been inlined.
+          if (!utils::HasExternalData(out_tensorproto)) {
+            ORT_THROW_IF_ERROR(graph.AddInitializedOrtValue(out_tensorproto, OrtValue()));
+          } else {
+            ORT_THROW_IF_ERROR(graph.AddInitializedOrtValue(out_tensorproto, ort_value));
+          }
         }
       }
     }

@@ -25,7 +25,6 @@ Status UnaryOpBuilder::AddToModelBuilderImpl(ModelBuilder& model_builder, const 
   const auto& op_type(node.OpType());
   const auto& input_defs(node.InputDefs());
 
-#if defined(COREML_ENABLE_MLPROGRAM)
   if (model_builder.CreateMLProgram()) {
     using namespace CoreML::Specification::MILSpec;
 
@@ -38,6 +37,8 @@ Status UnaryOpBuilder::AddToModelBuilderImpl(ModelBuilder& model_builder, const 
       coreml_op_type = "erf";
     } else if (op_type == "Round") {
       coreml_op_type = "round";
+    } else if (op_type == "Exp") {
+      coreml_op_type = "exp";
     } else {
       return ORT_MAKE_STATUS(ONNXRUNTIME, INVALID_ARGUMENT,
                              "UnaryOpBuilder::AddToModelBuilderImpl, unexpected op: ", op_type);
@@ -58,9 +59,7 @@ Status UnaryOpBuilder::AddToModelBuilderImpl(ModelBuilder& model_builder, const 
     AddOperationOutput(*op, *node.OutputDefs()[0]);
 
     model_builder.AddOperation(std::move(op));
-  } else  // NOLINT
-#endif    // defined (COREML_ENABLE_MLPROGRAM)
-  {
+  } else {
     std::unique_ptr<COREML_SPEC::NeuralNetworkLayer> layer = model_builder.CreateNNLayer(node);
 
     if (op_type == "Sqrt") {
@@ -82,8 +81,10 @@ Status UnaryOpBuilder::AddToModelBuilderImpl(ModelBuilder& model_builder, const 
 
 bool UnaryOpBuilder::IsOpSupportedImpl(const Node& node, const OpBuilderInputParams& input_params,
                                        const logging::Logger& /*logger*/) const {
-  if (!input_params.create_mlprogram && (node.OpType() == "Erf" || node.OpType() == "Round")) {
-    return false;
+  if (!input_params.create_mlprogram) {
+    if (node.OpType() == "Erf" || node.OpType() == "Round" || node.OpType() == "Exp") {
+      return false;
+    }
   }
   return true;
 }

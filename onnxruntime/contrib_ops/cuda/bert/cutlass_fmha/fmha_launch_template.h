@@ -142,15 +142,16 @@ template <typename T, typename ArchTag, bool is_aligned, int queries_per_block, 
 void LaunchCutlassFmha(const MemoryEfficientAttentionParams& params) {
   constexpr bool dropout = false;
   using Attention = AttentionKernel<T, ArchTag, is_aligned, queries_per_block, keys_per_block, max_head_size, dropout>;
+
   typename Attention::Params p;
   {  // set parameters
     p.query_ptr = const_cast<T*>(reinterpret_cast<const T*>(params.query));
     p.key_ptr = const_cast<T*>(reinterpret_cast<const T*>(params.key));
     p.value_ptr = const_cast<T*>(reinterpret_cast<const T*>(params.value));
     p.attn_bias_ptr = const_cast<T*>(reinterpret_cast<const T*>(params.attn_bias));
-    p.seqstart_q_ptr = params.seqstart_q_ptr;
-    p.seqstart_k_ptr = params.seqstart_k_ptr;
-    p.seqlen_k_ptr = params.seqlen_k_ptr;
+    p.seqstart_q_ptr = const_cast<int32_t*>(params.seqstart_q_ptr);
+    p.seqstart_k_ptr = const_cast<int32_t*>(params.seqstart_k_ptr);
+    p.seqlen_k_ptr = const_cast<int32_t*>(params.seqlen_k_ptr);
 
     p.logsumexp_ptr = nullptr;  // [num_heads, num_queries] for backward or nullptr for forward
     p.output_ptr = reinterpret_cast<T*>(params.output);
@@ -175,7 +176,14 @@ void LaunchCutlassFmha(const MemoryEfficientAttentionParams& params) {
     p.num_keys = params.kv_sequence_length;
 
     if (params.causal) {
-      p.custom_mask_type = Attention::CausalFromBottomRight;
+      // ONNX spec: is_causal means upper-left alignment (q_i attends to kv[0..i]).
+      // When past_sequence_length > 0 (decode with KV cache), positions shift → lower-right.
+      // causal_from_top_left=true: past_seq==0, use CausalFromTopLeft (offset=0).
+      // causal_from_top_left=false: past_seq>0 or S_q==S_kv, use CausalFromBottomRight
+      //   (offset = num_keys - num_queries, which is 0 when square).
+      p.custom_mask_type = params.causal_from_top_left
+                               ? Attention::CausalFromTopLeft
+                               : Attention::CausalFromBottomRight;
     }
 
     // We use max_sequence_length to calculate KV stride
@@ -222,6 +230,7 @@ void LaunchCutlassFmha(const MemoryEfficientAttentionParams& params) {
     }
 
     p.use_smooth_softmax = params.use_smooth_softmax;
+    p.window_size = params.local_window_size;
   }
 
   auto kernel_fn = attention_kernel_batched_impl<Attention>;
@@ -256,8 +265,35 @@ void DispatchIsAligned(const MemoryEfficientAttentionParams& params) {
                     params.qk_head_size % AlignedAK::kAlignmentK == 0 &&
                     params.v_head_size % AlignedAK::kAlignmentV == 0;
 
+  // Bias stride alignment check: route to the unaligned kernel when bias strides
+  // don't satisfy the aligned kernel's kAlignmentQ requirement.
+  //
+  // kAlignmentQ is template-dependent (kernel_forward.h:414):
+  //   isAligned=true:  kAlignmentQ = DefaultConfig::kAlignmentA (8 for fp16/bf16 SM75+)
+  //   isAligned=false: kAlignmentQ = GemmType::kMinimumAlignment (4 for fp16/bf16 SM75+)
+  // So check_supported (line 632) enforces DIFFERENT thresholds per path.
+  //
+  // The ONNX Attention kernel (core/providers/cuda/llm/attention.cc) gates MEA eligibility
+  // at kMinimumAlignment (4), allowing strides like 12 that the unaligned kernel handles.
+  // Without this check, such inputs dispatch to the aligned kernel where 12%8≠0 crashes.
+  // Contrib MHA gates at 4*sizeof(T)=8 for fp16, making this check redundant there.
+  if (params.attn_bias != nullptr) {
+    int num_keys = params.kv_sequence_length;
+    int num_queries = params.sequence_length;
+    int bias_strideM = num_keys;
+    // Broadcast dimensions use stride=0, which satisfies any alignment (0 % N == 0).
+    int bias_strideH = params.broadcast_attn_bias_dim_1 ? 0 : num_queries * num_keys;
+    int bias_strideB = params.broadcast_attn_bias_dim_0
+                           ? 0
+                           : ((params.broadcast_attn_bias_dim_1 ? 1 : params.num_heads) * num_queries * num_keys);
+    is_aligned = is_aligned &&
+                 bias_strideM % AlignedAK::kAlignmentQ == 0 &&
+                 (params.num_heads <= 1 || bias_strideH % AlignedAK::kAlignmentQ == 0) &&
+                 (params.batch_size <= 1 || bias_strideB % AlignedAK::kAlignmentQ == 0);
+  }
+
   DISPATCH_BOOL(is_aligned, kIsAligned, ([&]() {
-                  LaunchCutlassFmha<T, ArchTag, kIsAligned, queries_per_block, keys_per_block, max_head_size>(params);
+                  LaunchCutlassFmha<T, ArchTag, kIsAligned::value, queries_per_block, keys_per_block, max_head_size>(params);
                 }));
 
 #if defined(_MSC_VER) && !defined(__clang__)

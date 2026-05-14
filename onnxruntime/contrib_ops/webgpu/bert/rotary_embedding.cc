@@ -27,7 +27,7 @@ Status RotaryEmbeddingProgram::GenerateShaderCode(ShaderHelper& shader) const {
   const auto& sin_cache = shader.AddInput("sin_cache", ShaderUsage::UseUniform);
   const auto& output = shader.AddOutput("output", ShaderUsage::UseUniform);
   // TODO: remove output_indices.
-  const auto& output_indices = shader.AddIndices("output_indices", false);
+  const auto& output_indices = shader.AddIndices("output_indices", ShaderUsage::None);
   const auto interleaved_str = interleaved_ ? "true" : "false";
   shader.MainFunctionBody() << "  let half_rotary_emb_dim = uniforms.cos_cache_shape[1];\n"
                                "  let bsnh = global_idx / uniforms.global_stride % uniforms.global_shape;\n"
@@ -35,18 +35,102 @@ Status RotaryEmbeddingProgram::GenerateShaderCode(ShaderHelper& shader) const {
                                "  if (global_idx >= size) { return; }\n"
                                "  if (bsnh[3] < half_rotary_emb_dim) {\n"
                             << "    let position_ids_idx = " << position_ids.BroadcastedIndicesToOffset("bsnh.xy", output_indices) << ";\n"
-                            << "    let position_id = u32(" << position_ids.GetByOffset("position_ids_idx") << ") + select(0, bsnh[1], position_ids_idx == 0);\n"
+                            << "    let raw_pos = " << position_ids.GetByOffset("position_ids_idx") << ";\n"
                             << "    let i = dot(bsnh, uniforms.input_output_stride) + select(0, bsnh[3], " << interleaved_str << ");\n"
                             << "    let j = i + select(half_rotary_emb_dim, 1, " << interleaved_str << ");\n"
-                            << "    let re = " << input.GetByOffset("i") << " * " << cos_cache.GetByIndices("vec2<u32>(position_id, bsnh[3])") << " - " << input.GetByOffset("j") << " * " << sin_cache.GetByIndices("vec2<u32>(position_id, bsnh[3])") << ";\n"
-                            << "    " << output.SetByOffset("i", "re") << "\n"
-                            << "    let im = " << input.GetByOffset("i") << " * " << sin_cache.GetByIndices("vec2<u32>(position_id, bsnh[3])") << " + " << input.GetByOffset("j") + " * " << cos_cache.GetByIndices("vec2<u32>(position_id, bsnh[3])") << ";\n"
-                            << "    " << output.SetByOffset("j", "im") << "\n"
+                                                                                                       "    let max_position = uniforms.cos_cache_shape[0];\n"
+                                                                                                       // Bounds check: raw_pos < 0 catches negative position_ids (i32 from truncated int64).
+                                                                                                       // After u32 conversion + offset, check >= max_position catches too-large values.
+                                                                                                       // On OOB, pass through input unchanged (same as CUDA kernel behavior).
+                                                                                                       "    if (raw_pos < 0) {\n"
+                            << "      " << output.SetByOffset("i", input.GetByOffset("i")) << "\n"
+                            << "      " << output.SetByOffset("j", input.GetByOffset("j")) << "\n"
+                                                                                              "    } else {\n"
+                                                                                              "      let position_id = u32(raw_pos) + select(0, bsnh[1], position_ids_idx == 0);\n"
+                                                                                              "      if (position_id >= max_position) {\n"
+                            << "        " << output.SetByOffset("i", input.GetByOffset("i")) << "\n"
+                            << "        " << output.SetByOffset("j", input.GetByOffset("j")) << "\n"
+                                                                                                "      } else {\n"
+                            << "        let re = " << input.GetByOffset("i") << " * " << cos_cache.GetByIndices("vec2<u32>(position_id, bsnh[3])") << " - " << input.GetByOffset("j") << " * " << sin_cache.GetByIndices("vec2<u32>(position_id, bsnh[3])") << ";\n"
+                            << "        " << output.SetByOffset("i", "re") << "\n"
+                            << "        let im = " << input.GetByOffset("i") << " * " << sin_cache.GetByIndices("vec2<u32>(position_id, bsnh[3])") << " + " << input.GetByOffset("j") << " * " << cos_cache.GetByIndices("vec2<u32>(position_id, bsnh[3])") << ";\n"
+                            << "        " << output.SetByOffset("j", "im") << "\n"
+                                                                              "      }\n"
+                                                                              "    }\n"
                             << "  } else { \n"
                                "    let k = dot(bsnh, uniforms.input_output_stride) + half_rotary_emb_dim;\n"
                             << "    " << output.SetByOffset("k", input.GetByOffset("k")) << "\n"
                             << "  }";
 
+  return Status::OK();
+}
+
+Status FusedQKRotaryEmbeddingProgram::GenerateShaderCode(ShaderHelper& shader) const {
+  // Inputs
+  const auto& q_input = shader.AddInput("q_input", ShaderUsage::UseUniform);
+  const auto& k_input = shader.AddInput("k_input", ShaderUsage::UseUniform);
+  const auto& seqlens = shader.AddInput("seqlens", ShaderUsage::UseUniform);
+  const auto& cos_cache = shader.AddInput("cos_cache", ShaderUsage::UseUniform);
+  const auto& sin_cache = shader.AddInput("sin_cache", ShaderUsage::UseUniform);
+  // Outputs
+  const auto& q_output = shader.AddOutput("q_output", ShaderUsage::UseUniform);
+  const auto& k_output = shader.AddOutput("k_output", ShaderUsage::UseUniform);
+
+  const auto interleaved_str = interleaved_ ? "true" : "false";
+
+  shader.MainFunctionBody()
+      << "  if (global_idx >= uniforms.q_domain_size) { return; }\n"
+      << "  let half_rotary_dim = uniforms.cos_cache_shape[1];\n"
+      << "  let bsnh = global_idx / uniforms.q_global_stride % uniforms.q_global_shape;\n"
+      << "  if (bsnh[3] < half_rotary_dim) {\n"
+      << "    let batch_idx = bsnh[0];\n"
+      << "    let sequence_idx = bsnh[1];\n"
+      << "    let seqlen_i = " << seqlens.GetByOffset("batch_idx") << ";\n"
+      << "    let seqlen = u32(seqlen_i);\n"
+      << "    let total_seqlen = seqlen + 1u;\n"
+      << "    let past_seqlen = total_seqlen - uniforms.q_global_shape[1];\n"
+      // position_id is derived from past_seqlen + sequence_idx (always non-negative).
+      << "    let position_id = past_seqlen + sequence_idx;\n"
+      << "    let qi = dot(bsnh, uniforms.q_input_output_stride) + select(0u, bsnh[3], " << interleaved_str << ");\n"
+      << "    let qj = qi + select(half_rotary_dim, 1u, " << interleaved_str << ");\n"
+                                                                                // Bounds check: position_id must be within cos/sin cache range.
+                                                                                // On OOB, pass through input unchanged (same as CUDA kernel behavior).
+                                                                                "    let max_position = uniforms.cos_cache_shape[0];\n"
+                                                                                "    if (position_id >= max_position) {\n"
+      << "      " << q_output.SetByOffset("qi", q_input.GetByOffset("qi")) << "\n"
+      << "      " << q_output.SetByOffset("qj", q_input.GetByOffset("qj")) << "\n"
+      << "      if (bsnh[2] < uniforms.k_global_shape[2]) {\n"
+      << "        let ki = dot(bsnh, uniforms.k_input_output_stride) + select(0u, bsnh[3], " << interleaved_str << ");\n"
+      << "        let kj = ki + select(half_rotary_dim, 1u, " << interleaved_str << ");\n"
+      << "        " << k_output.SetByOffset("ki", k_input.GetByOffset("ki")) << "\n"
+      << "        " << k_output.SetByOffset("kj", k_input.GetByOffset("kj")) << "\n"
+                                                                                "      }\n"
+                                                                                "    } else {\n"
+      << "      let cos_v = " << cos_cache.GetByIndices("vec2<u32>(position_id, bsnh[3])") << ";\n"
+      << "      let sin_v = " << sin_cache.GetByIndices("vec2<u32>(position_id, bsnh[3])") << ";\n"
+      << "      let q_re = " << q_input.GetByOffset("qi") << " * cos_v - " << q_input.GetByOffset("qj") << " * sin_v;\n"
+      << "      " << q_output.SetByOffset("qi", "q_re") << "\n"
+      << "      let q_im = " << q_input.GetByOffset("qi") << " * sin_v + " << q_input.GetByOffset("qj") << " * cos_v;\n"
+      << "      " << q_output.SetByOffset("qj", "q_im") << "\n"
+      // Conditionally process Key (only for heads that exist in K domain)
+      << "      if (bsnh[2] < uniforms.k_global_shape[2]) {\n"
+      << "        let ki = dot(bsnh, uniforms.k_input_output_stride) + select(0u, bsnh[3], " << interleaved_str << ");\n"
+      << "        let kj = ki + select(half_rotary_dim, 1u, " << interleaved_str << ");\n"
+      << "        let k_re = " << k_input.GetByOffset("ki") << " * cos_v - " << k_input.GetByOffset("kj") << " * sin_v;\n"
+      << "        " << k_output.SetByOffset("ki", "k_re") << "\n"
+      << "        let k_im = " << k_input.GetByOffset("ki") << " * sin_v + " << k_input.GetByOffset("kj") << " * cos_v;\n"
+      << "        " << k_output.SetByOffset("kj", "k_im") << "\n"
+                                                             "      }\n"
+                                                             "    }\n"
+      << "  } else {\n"
+      << "    let qk = dot(bsnh, uniforms.q_input_output_stride) + half_rotary_dim;\n"
+      << "    " << q_output.SetByOffset("qk", q_input.GetByOffset("qk")) << "\n"
+      // Conditionally process Key (only for heads that exist in K domain)
+      << "    if (bsnh[2] < uniforms.k_global_shape[2]) {\n"
+      << "      let kk = dot(bsnh, uniforms.k_input_output_stride) + half_rotary_dim;\n"
+      << "      " << k_output.SetByOffset("kk", k_input.GetByOffset("kk")) << "\n"
+      << "    }\n"
+      << "  }\n";
   return Status::OK();
 }
 
@@ -66,12 +150,17 @@ Status RotaryEmbedding::ComputeInternal(onnxruntime::webgpu::ComputeContext& con
   const auto* sin_cache = context.Input<Tensor>(3);
   auto* output = context.Output(0, input_shape);
 
-  const auto batch_size = gsl::narrow<uint32_t>(input->Shape()[0]);
-  const auto batch_stride = gsl::narrow<uint32_t>(input_shape.SizeFromDimension(1));
-  const auto sequence_length = gsl::narrow<uint32_t>(input_shape[input_shape.NumDimensions() - 2]);
+  const auto batch_size = onnxruntime::narrow<uint32_t>(input->Shape()[0]);
+  const auto batch_stride = onnxruntime::narrow<uint32_t>(input_shape.SizeFromDimension(1));
+  const auto sequence_length = onnxruntime::narrow<uint32_t>(input_shape[input_shape.NumDimensions() - 2]);
   const auto hidden_size = batch_stride / sequence_length;
-  const auto half_rotary_embedding_dim = gsl::narrow<uint32_t>(cos_cache->Shape()[1]);
+  const auto half_rotary_embedding_dim = onnxruntime::narrow<uint32_t>(cos_cache->Shape()[1]);
   const auto head_size = rotary_embedding_dim_ == 0 ? half_rotary_embedding_dim * 2 : hidden_size / num_heads_;
+
+  // position_ids bounds validation is handled by shader-side defense-in-depth checks
+  // (OOB position_ids → pass-through input unchanged). Host-side value scanning is not possible
+  // because WebGPU program inputs must be GPU buffers (InputMemoryType(OrtMemTypeCPUInput) is
+  // incompatible with AddInputs).
 
   // Rotary embeddings will be calculated in a pair-wise fashion. In accordance, use the shape
   // [batch size, sequence length, num of heads, num of pairs to rotate + num of dims to copy]
@@ -85,11 +174,11 @@ Status RotaryEmbedding::ComputeInternal(onnxruntime::webgpu::ComputeContext& con
   std::vector<uint32_t> global_dims(rank);
   std::vector<uint32_t> global_strides(rank);
   for (size_t j = 0; j < rank; ++j) {
-    global_dims[j] = gsl::narrow<uint32_t>(global_shape[j]);
-    global_strides[j] = gsl::narrow<uint32_t>(global_shape.SizeFromDimension(j + 1));
+    global_dims[j] = onnxruntime::narrow<uint32_t>(global_shape[j]);
+    global_strides[j] = onnxruntime::narrow<uint32_t>(global_shape.SizeFromDimension(j + 1));
   }
 
-  const auto output_size = gsl::narrow<const uint32_t>(global_shape.Size());
+  const auto output_size = onnxruntime::narrow<const uint32_t>(global_shape.Size());
   RotaryEmbeddingProgram program{interleaved_};
   const auto input_output_strides =
       input_shape.NumDimensions() == 3
@@ -100,7 +189,7 @@ Status RotaryEmbedding::ComputeInternal(onnxruntime::webgpu::ComputeContext& con
 
   program
       .CacheHint(interleaved_)
-      .AddInputs({{input, ProgramTensorMetadataDependency::Rank},
+      .AddInputs({{input, ProgramTensorMetadataDependency::TypeAndRank},
                   {position_ids, ProgramTensorMetadataDependency::Rank},
                   {cos_cache, ProgramTensorMetadataDependency::Rank},
                   {sin_cache, ProgramTensorMetadataDependency::Rank}})
