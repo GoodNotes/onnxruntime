@@ -5,7 +5,7 @@ parameters:
     default: "16.3.0"
   macos-resource-class:
     type: string
-    default: macos.m4pro.medium
+    default: m4pro.medium
 
 # Jobs -------------------------------------------------------------------------
 jobs:
