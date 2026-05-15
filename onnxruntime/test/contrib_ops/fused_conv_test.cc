@@ -32,15 +32,14 @@ void TestConvOp(const ConvOpAndTestAttributes& attributes,
                 const vector<int64_t>& expected_output_shape,
                 bool disable_cpu = false,
                 bool disable_cuda = false,
-                bool disable_rocm = false,
+                bool disable_webgpu = false,
                 bool use_float16 = false,
                 bool weight_is_initializer = false) {
   bool enable_cuda = HasCudaEnvironment(0) && !use_float16 && !disable_cuda;
-  // Only ROCm EP supports float16.
-  bool enable_rocm = (nullptr != DefaultRocmExecutionProvider().get()) && !disable_rocm;
+  bool enable_webgpu = (nullptr != DefaultWebGpuExecutionProvider().get()) && !disable_webgpu;
   bool enable_cpu = (nullptr != DefaultCpuExecutionProvider().get()) && !use_float16 && !disable_cpu;
 
-  if (enable_cuda || enable_rocm || enable_cpu) {
+  if (enable_cuda || enable_cpu || enable_webgpu) {
     OpTester test("FusedConv", 1, onnxruntime::kMSDomain);
     test.AddAttribute("group", attributes.group);
     test.AddAttribute("kernel_shape", attributes.kernel_shape);
@@ -92,8 +91,8 @@ void TestConvOp(const ConvOpAndTestAttributes& attributes,
       execution_providers.push_back(DefaultCudaExecutionProvider());
     }
 
-    if (enable_rocm) {
-      execution_providers.push_back(DefaultRocmExecutionProvider());
+    if (enable_webgpu) {
+      execution_providers.push_back(DefaultWebGpuExecutionProvider());
     }
 
     if (enable_cpu) {
@@ -110,15 +109,15 @@ void RunConvOp(const ConvOpAndTestAttributes& attributes,
                const vector<int64_t>& expected_output_shape,
                bool disable_cpu = false,
                bool disable_cuda = false,
-               bool disable_rocm = false) {
+               bool disable_webgpu = false) {
   bool weight_is_initializer = false;
   bool use_float16 = false;
   TestConvOp(attributes, inputs, input_shapes, expected_output, expected_output_shape,
-             disable_cpu, disable_cuda, disable_rocm, use_float16, weight_is_initializer);
+             disable_cpu, disable_cuda, disable_webgpu, use_float16, weight_is_initializer);
 
   use_float16 = true;
   TestConvOp(attributes, inputs, input_shapes, expected_output, expected_output_shape,
-             disable_cpu, disable_cuda, disable_rocm, use_float16, weight_is_initializer);
+             disable_cpu, disable_cuda, disable_webgpu, use_float16, weight_is_initializer);
 }
 
 TEST(FusedConvTest, Conv2D_HardSigmoid) {
@@ -184,7 +183,7 @@ TEST(FusedConvTest, Conv2D_Bias_Relu) {
   RunConvOp(attrs, {X, W, B}, {X_shape, W_shape, B_shape}, expected_vals, Y_shape);
 }
 
-#if defined(USE_CUDA) || defined(USE_ROCM)
+#if defined(USE_CUDA)
 
 TEST(FusedConvTest, Conv2D_Bias_Z_Relu) {
   ConvOpAndTestAttributes attrs = {
@@ -207,7 +206,7 @@ TEST(FusedConvTest, Conv2D_Bias_Z_Relu) {
   vector<float> Z = {-1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f};
   vector<int64_t> Z_shape = {1, 2, 2, 2};
   auto expected_vals = {12.0f, 17.0f, 25.0f, 29.0f, 11.0f, 15.0f, 23.0f, 28.0f};
-  RunConvOp(attrs, {X, W, B, Z}, {X_shape, W_shape, B_shape, Z_shape}, expected_vals, Y_shape, true, false, false);
+  RunConvOp(attrs, {X, W, B, Z}, {X_shape, W_shape, B_shape, Z_shape}, expected_vals, Y_shape, true, false);
 }
 
 #endif

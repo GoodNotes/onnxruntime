@@ -14,6 +14,30 @@ namespace webgpu {
 
 using namespace onnxruntime::webgpu;
 
+class SplitPackedQKVWithRotaryEmbeddingProgram final : public Program<SplitPackedQKVWithRotaryEmbeddingProgram> {
+ public:
+  SplitPackedQKVWithRotaryEmbeddingProgram(bool interleaved, uint32_t multi_rotary_cache_concat_offset)
+      : Program{"SplitPackedQKVWithRotaryEmbedding"},
+        interleaved_{interleaved},
+        multi_rotary_cache_concat_offset_{multi_rotary_cache_concat_offset} {}
+
+  Status GenerateShaderCode(ShaderHelper& sh) const override;
+
+  WEBGPU_PROGRAM_DEFINE_UNIFORM_VARIABLES(
+      {"sequence_length", ProgramUniformVariableDataType::Uint32},
+      {"hidden_size", ProgramUniformVariableDataType::Uint32},
+      {"kv_hidden_size", ProgramUniformVariableDataType::Uint32},
+      {"num_heads", ProgramUniformVariableDataType::Uint32},
+      {"kv_num_heads", ProgramUniformVariableDataType::Uint32},
+      {"head_size", ProgramUniformVariableDataType::Uint32},
+      {"half_rotary_dim", ProgramUniformVariableDataType::Uint32},
+      {"dispatch_size", ProgramUniformVariableDataType::Uint32});
+
+ private:
+  const bool interleaved_;
+  const uint32_t multi_rotary_cache_concat_offset_;
+};
+
 class GroupQueryAttention final : public WebGpuKernel {
  public:
   GroupQueryAttention(const OpKernelInfo& info) : WebGpuKernel(info) {
@@ -47,6 +71,8 @@ class GroupQueryAttention final : public WebGpuKernel {
   bool use_smooth_softmax_;
   Status ComputeInternal(onnxruntime::webgpu::ComputeContext& context) const override;
 };
+
+KernelCreateInfo CreateGroupQueryAttentionKernelInfo(bool enable_graph_capture);
 
 }  // namespace webgpu
 }  // namespace contrib

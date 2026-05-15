@@ -405,8 +405,8 @@ export class TensorResultValidator {
           'TestRunner',
           `Tensor mismatch: \nACTUAL: type=${actual[i].type}; dims=[${actual[i].dims}]; data=[${actual[i].data}]\nEXPECT: type=${expected[i].type}; dims=[${expected[i].dims}]; data=[${expected[i].data}]`,
         );
+        throw new Error('tensor data should match');
       }
-      expect(match, 'tensor data should match').to.be.true;
     }
   }
 
@@ -1016,8 +1016,9 @@ export class ProtoOpTestContext {
       // check if all test cases have the same shape for each inputs
       if (
         test.cases.some((testCase) =>
-          testCase.inputs!.some((input: Test.TensorValue, i) =>
-            TensorResultValidator.integerEqual(input.dims, (test.cases[0].inputs![i] as Test.TensorValue).dims),
+          testCase.inputs!.some(
+            (input: Test.TensorValue, i) =>
+              !TensorResultValidator.integerEqual(input.dims, (test.cases[0].inputs![i] as Test.TensorValue).dims),
           ),
         )
       ) {

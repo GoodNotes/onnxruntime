@@ -14,25 +14,13 @@ from pathlib import Path
 
 import numpy
 import onnx
+from ml_dtypes import float8_e4m3fn, int4, uint4
 from onnx import ModelProto, TensorProto, external_data_helper
 from onnx import onnx_pb as onnx_proto
 from onnx.helper import make_graph, make_model, make_node, make_tensor_value_info
 from onnx.reference import ReferenceEvaluator
 
 from onnxruntime import GraphOptimizationLevel, InferenceSession, SessionOptions
-
-try:
-    from onnx.reference.custom_element_types import float8e4m3fn
-except ImportError:
-    float8e4m3fn = None
-
-# INT4 np.dtypes added in ONNX 1.16. These map to np.int8/np.uint8 because numpy
-# does not support sub-byte types.
-try:
-    from onnx.reference.custom_element_types import int4, uint4
-except ImportError:
-    int4 = None
-    uint4 = None
 
 try:
     from onnx.reference.op_run import to_array_extended
@@ -149,9 +137,9 @@ ONNX_TYPE_TO_NP_TYPE = {
     onnx_proto.TensorProto.UINT8: numpy.dtype("uint8"),
     onnx_proto.TensorProto.INT16: numpy.dtype("int16"),
     onnx_proto.TensorProto.UINT16: numpy.dtype("uint16"),
-    onnx_proto.TensorProto.FLOAT8E4M3FN: float8e4m3fn,
-    onnx_proto.TensorProto.INT4: int4,  # base_dtype is np.int8
-    onnx_proto.TensorProto.UINT4: uint4,  # base_dtype is np.uint8
+    onnx_proto.TensorProto.FLOAT8E4M3FN: float8_e4m3fn,
+    onnx_proto.TensorProto.INT4: int4,
+    onnx_proto.TensorProto.UINT4: uint4,
 }
 
 ONNX_INT_TYPE_RANGE = {
@@ -164,9 +152,7 @@ ONNX_INT_TYPE_RANGE = {
 }
 
 ONNX_INT_TYPE_SYMMETRIC_RANGE = {
-    onnx_proto.TensorProto.UINT8: (numpy.array(0, dtype=numpy.uint8), numpy.array(254, dtype=numpy.uint8)),
     onnx_proto.TensorProto.INT8: (numpy.array(-127, dtype=numpy.int8), numpy.array(127, dtype=numpy.int8)),
-    onnx_proto.TensorProto.UINT16: (numpy.array(0, dtype=numpy.uint16), numpy.array(65534, dtype=numpy.uint16)),
     onnx_proto.TensorProto.INT16: (numpy.array(-32767, dtype=numpy.int16), numpy.array(32767, dtype=numpy.int16)),
 }
 
@@ -175,7 +161,7 @@ ONNX_INT_TYPE_REDUCED_RANGE = {
     onnx_proto.TensorProto.INT8: (numpy.array(-64, dtype=numpy.int8), numpy.array(64, dtype=numpy.int8)),
     onnx_proto.TensorProto.UINT16: (numpy.array(0, dtype=numpy.uint16), numpy.array(32767, dtype=numpy.uint16)),
     onnx_proto.TensorProto.INT16: (numpy.array(-16384, dtype=numpy.int16), numpy.array(16384, dtype=numpy.int16)),
-    onnx_proto.TensorProto.UINT4: (numpy.array(0, dtype=int4), numpy.array(7, dtype=int4)),
+    onnx_proto.TensorProto.UINT4: (numpy.array(0, dtype=uint4), numpy.array(7, dtype=uint4)),
     onnx_proto.TensorProto.INT4: (numpy.array(-4, dtype=int4), numpy.array(3, dtype=int4)),
 }
 
@@ -290,7 +276,7 @@ def compute_scale_zp(rmin, rmax, qmin, qmax, symmetric=False, min_real_range=Non
     dr = numpy.array(rmax - rmin, dtype=numpy.float64)
     dq = numpy.array(qmax, dtype=numpy.float64) - numpy.array(qmin, dtype=numpy.float64)
     scale = numpy.array(dr / dq)
-    assert scale >= 0, "scale isse"
+    assert scale >= 0, "scale issue"
     if scale < numpy.finfo(rmax.dtype).tiny:
         scale = numpy.array(1.0, dtype=rmax.dtype)
         zero_point = numpy.array(0, dtype=qmin.dtype)
@@ -311,6 +297,65 @@ def compute_scale_zp(rmin, rmax, qmin, qmax, symmetric=False, min_real_range=Non
     return [zero_point, scale]
 
 
+def snap_zero_point_to_uint8(rmin, rmax, qmin: int = 0, qmax: int = 255, min_real_range: float | None = None):
+    """Snap a uint8 activation zero-point to qmin (when rmin >= 0) or mid (when rmin < 0).
+
+    Used by the ActivationRestrictedAsymmetric quantization option. Recomputes scale so the
+    dequantized range still covers [rmin, rmax] without clipping.
+
+    :parameter rmin: calibrated minimum activation value (numpy scalar)
+    :parameter rmax: calibrated maximum activation value (numpy scalar)
+    :parameter qmin: minimum quantized value (int, default 0)
+    :parameter qmax: maximum quantized value (int, default 255)
+    :parameter min_real_range: minimum floating-point range to enforce (same semantics as compute_scale_zp).
+        When not None and > 0, rmax is adjusted to max(rmax, rmin + min_real_range) before scale computation.
+    :return: (zero_point, scale) with zero_point dtype uint8 and scale dtype float32
+    """
+    qmin_val = int(qmin)
+    qmax_val = int(qmax)
+    mid = (qmin_val + qmax_val + 1) // 2
+
+    rmin = float(numpy.squeeze(rmin))
+    rmax = float(numpy.squeeze(rmax))
+
+    # Expand the range to include zero, mirroring compute_scale_zp's ordering.
+    rmin = min(rmin, 0.0)
+    rmax = max(rmax, 0.0)
+
+    # Apply minimum real range after zero-inclusion, mirroring compute_scale_zp behaviour.
+    if min_real_range is not None and min_real_range > 0:
+        rmax = max(rmax, rmin + float(min_real_range))
+
+    if rmax <= rmin:
+        # Degenerate range - apply the same snap logic as the normal path, then
+        # compute a meaningful scale rather than a hardcoded 1.0.
+        degenerate_zp = qmin_val if rmin >= 0.0 else mid
+        abs_max = max(abs(rmin), abs(rmax))
+        # Use full range when zp snaps to qmin (all-positive), half range for mid snap.
+        denom = (qmax_val - qmin_val) if degenerate_zp == qmin_val else max(1, (qmax_val - qmin_val) // 2)
+        scale_val = (abs_max if abs_max > 0 else 1.0) / max(1, denom)
+        if min_real_range is not None and scale_val < min_real_range / (qmax_val - qmin_val):
+            scale_val = min_real_range / (qmax_val - qmin_val)
+        return numpy.array(degenerate_zp, dtype=numpy.uint8), numpy.array(scale_val, dtype=numpy.float32)
+
+    if rmin >= 0.0:
+        zero_point = numpy.array(qmin_val, dtype=numpy.uint8)
+        scale = numpy.array(rmax / (qmax_val - qmin_val), dtype=numpy.float32)
+    else:
+        # Snap zero-point to the midpoint of the quantized range.
+        zero_point = numpy.array(mid, dtype=numpy.uint8)
+        # Choose scale that covers both halves without clipping.
+        scale_neg = -rmin / (mid - qmin_val)  # scale needed to represent rmin at q=qmin
+        scale_pos = rmax / (qmax_val - mid)  # scale needed to represent rmax at q=qmax
+        scale = numpy.array(max(scale_neg, scale_pos), dtype=numpy.float32)
+
+    # Enforce minimum real range floor on scale.
+    if min_real_range is not None and float(scale) < min_real_range / (qmax_val - qmin_val):
+        scale = numpy.array(min_real_range / (qmax_val - qmin_val), dtype=numpy.float32)
+
+    return zero_point, scale
+
+
 def compute_scale_zp_float8(element_type, std):
     """Calculate the scale s for a float8 type (E4M3FN).
     The function assumes the coefficient distribution and the float 8
@@ -324,11 +369,10 @@ def compute_scale_zp_float8(element_type, std):
     zp_dtype = None
     if element_type not in FLOAT8_DISTRIBUTIONS:
         if element_type == TensorProto.FLOAT8E4M3FN:
-            from onnx.numpy_helper import float8e4m3_to_float32
-            from onnx.reference.custom_element_types import float8e4m3fn
+            from ml_dtypes import float8_e4m3fn  # noqa: PLC0415
 
-            zp_dtype = float8e4m3fn
-            all_values = [float8e4m3_to_float32(i) for i in range(256)]
+            zp_dtype = float8_e4m3fn
+            all_values = [float(i) for i in range(256)]
             values = numpy.array(
                 [f for f in all_values if not numpy.isnan(f) and not numpy.isinf(f)], dtype=numpy.float32
             )
@@ -336,9 +380,9 @@ def compute_scale_zp_float8(element_type, std):
             raise ValueError(f"Quantization to element_type={element_type} not implemented.")
         FLOAT8_DISTRIBUTIONS[element_type] = values
     elif element_type == TensorProto.FLOAT8E4M3FN:
-        from onnx.reference.custom_element_types import float8e4m3fn
+        from ml_dtypes import float8_e4m3fn  # noqa: PLC0415
 
-        zp_dtype = float8e4m3fn
+        zp_dtype = float8_e4m3fn
 
     if zp_dtype is None:
         raise TypeError(f"Unexpected element_type {element_type}.")
@@ -449,7 +493,7 @@ def quantize_data(
     )
     if qType == TensorProto.FLOAT8E4M3FN:
         quantized_data = quantize_nparray(qType, data, scale, zero_point)
-        if any((quantized_data.astype(numpy.uint8).ravel() & 127) == 127):
+        if any((quantized_data.view(numpy.uint8).ravel() & 127) == 127):
             np_data = numpy.asarray(data)
             raise RuntimeError(
                 f"One of the quantized value is NaN data in [{np_data.min()}, {np_data.max()}], "
@@ -533,7 +577,7 @@ def quantize_onnx_initializer(
                     f"\nraw={str(q_weight_initializer)[:200]}."
                 )
     elif quant_type in (onnx.TensorProto.INT4, onnx.TensorProto.UINT4):
-        if q_weight_data.dtype not in (numpy.int8, numpy.uint8):
+        if q_weight_data.dtype not in (int4, uint4):
             raise RuntimeError(f"Quantized weights for {q_weight_name} must be 8-bit before packing as 4-bit values.")
 
         # We do not use onnx.helper.pack_float32_to_4bit() due to performance.
@@ -782,10 +826,10 @@ def generate_identified_filename(filename: Path, identifier: str) -> Path:
 
 
 def apply_plot(hist, hist_edges):
-    import sys
+    import sys  # noqa: PLC0415
 
-    import matplotlib.pyplot as plt
-    import numpy
+    import matplotlib.pyplot as plt  # noqa: PLC0415
+    import numpy  # noqa: PLC0415
 
     numpy.set_printoptions(threshold=sys.maxsize)
     print("Histogram:")
@@ -804,28 +848,21 @@ def write_calibration_table(calibration_cache, dir="."):
     Helper function to write calibration table to files.
     """
 
-    import json
+    import json  # noqa: PLC0415
 
-    import flatbuffers
-    import numpy as np
+    import flatbuffers  # noqa: PLC0415
+    import numpy as np  # noqa: PLC0415
 
-    import onnxruntime.quantization.CalTableFlatBuffers.KeyValue as KeyValue
-    import onnxruntime.quantization.CalTableFlatBuffers.TrtTable as TrtTable
-    from onnxruntime.quantization.calibrate import CalibrationMethod, TensorData, TensorsData
+    import onnxruntime.quantization.CalTableFlatBuffers.KeyValue as KeyValue  # noqa: PLC0415
+    import onnxruntime.quantization.CalTableFlatBuffers.TrtTable as TrtTable  # noqa: PLC0415
+
+    # Use the shared encoder from calibrate.py so write_calibration_table and
+    # save_tensors_data produce identical JSON for numpy scalar/array values.
+    from onnxruntime.quantization.calibrate import CalibrationCacheEncoder  # noqa: PLC0415
 
     logging.info(f"calibration cache: {calibration_cache}")
 
-    class MyEncoder(json.JSONEncoder):
-        def default(self, obj):
-            if isinstance(obj, (TensorData, TensorsData)):
-                return obj.to_dict()
-            if isinstance(obj, np.ndarray):
-                return {"data": obj.tolist(), "dtype": str(obj.dtype), "CLS": "numpy.array"}
-            if isinstance(obj, CalibrationMethod):
-                return {"CLS": obj.__class__.__name__, "value": str(obj)}
-            return json.JSONEncoder.default(self, obj)
-
-    json_data = json.dumps(calibration_cache, cls=MyEncoder)
+    json_data = json.dumps(calibration_cache, cls=CalibrationCacheEncoder)
 
     with open(os.path.join(dir, "calibration.json"), "w") as file:
         file.write(json_data)  # use `json.loads` to do the reverse
@@ -869,7 +906,7 @@ def write_calibration_table(calibration_cache, dir="."):
         file.write(buf)
 
     # Deserialize data (for validation)
-    if os.environ.get("QUANTIZATION_DEBUG", 0) in (1, "1"):
+    if os.environ.get("QUANTIZATION_DEBUG", "0") in (1, "1"):
         cal_table = TrtTable.TrtTable.GetRootAsTrtTable(buf, 0)
         dict_len = cal_table.DictLength()
         for i in range(dict_len):
@@ -969,6 +1006,51 @@ def model_has_infer_metadata(model: ModelProto) -> bool:
             if p.key == "onnx.infer" and p.value == "onnxruntime.quant":
                 return True
     return False
+
+
+def get_opset_version(model: ModelProto) -> int:
+    ai_onnx_domain = [opset for opset in model.opset_import if not opset.domain or opset.domain == "ai.onnx"]
+    if len(ai_onnx_domain) != 1:
+        raise ValueError("Failed to find proper ai.onnx domain")
+    opset_version = ai_onnx_domain[0].version
+
+    return opset_version
+
+
+def update_opset_version(model: ModelProto, weight_type: QuantType) -> ModelProto:
+    opset_version = get_opset_version(model)
+    target_opset_version = opset_version
+    weight_quant_type = getattr(weight_type, "tensor_type", weight_type)
+
+    if opset_version < 19 and weight_quant_type == onnx.TensorProto.FLOAT8E4M3FN:
+        logging.warning(
+            f"The original model opset version is {opset_version}, which does not support quantization to float 8. "
+            "Please update the model to opset >= 19. Automatically update the model to opset 19. "
+            "Please verify the quantized model."
+        )
+        target_opset_version = 19
+
+    elif opset_version == 10:
+        logging.warning(
+            f"The original model opset version is {opset_version}, which does not support node fusions. "
+            "Please update the model to opset >= 11 for better performance."
+        )
+
+    elif opset_version < 10:
+        logging.warning(
+            f"The original model opset version is {opset_version}, which does not support quantization. "
+            "Please update the model to opset >= 11. Automatically update the model to opset 11. "
+            "Please verify the quantized model."
+        )
+        target_opset_version = 11
+
+    if target_opset_version != opset_version:
+        model = onnx.version_converter.convert_version(model, target_opset_version)
+        # Additional nodes may be added to the model during the opset version conversion. Run shape inference
+        # to ensure all nodes are included in model.graph.value_info.
+        model = save_and_reload_model_with_shape_infer(model)
+
+    return model
 
 
 def load_model_with_shape_infer(model_path: Path) -> ModelProto:

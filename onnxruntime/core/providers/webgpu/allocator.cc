@@ -3,25 +3,38 @@
 
 #include "core/framework/session_state.h"
 #include "core/providers/webgpu/allocator.h"
-#include "core/providers/webgpu/webgpu_context.h"
+#include "core/providers/webgpu/buffer_manager.h"
 
 namespace onnxruntime {
 namespace webgpu {
+
+GpuBufferAllocator::GpuBufferAllocator(const BufferManager& buffer_manager, bool is_read_only_allocator)
+    : IAllocator(
+          OrtMemoryInfo(WEBGPU_BUFFER,
+                        is_read_only_allocator ? OrtAllocatorType::OrtReadOnlyAllocator
+                                               : OrtAllocatorType::OrtDeviceAllocator,
+                        WebGpuDevice,
+                        OrtMemTypeDefault)),
+      buffer_manager_{buffer_manager},
+      mapped_at_creation_{is_read_only_allocator && buffer_manager.SupportsUMA()} {
+}
 
 void* GpuBufferAllocator::Alloc(size_t size) {
   if (size == 0) {
     return nullptr;
   }
 
-  auto buffer = context_.BufferManager().Create(size);
-
   stats_.num_allocs++;
-  return buffer;
+
+  wgpu::BufferUsage usage = mapped_at_creation_ ? wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopySrc | wgpu::BufferUsage::CopyDst | wgpu::BufferUsage::MapWrite
+                                                : wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopySrc | wgpu::BufferUsage::CopyDst | wgpu::BufferUsage::Indirect;
+
+  return buffer_manager_.Create(size, usage);
 }
 
 void GpuBufferAllocator::Free(void* p) {
   if (p != nullptr) {
-    context_.BufferManager().Release(static_cast<WGPUBuffer>(p));
+    buffer_manager_.Release(static_cast<WGPUBuffer>(p));
     stats_.num_allocs--;
   }
 }

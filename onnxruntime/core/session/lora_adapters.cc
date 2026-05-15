@@ -12,13 +12,13 @@
 #include "core/session/allocator_adapters.h"
 #include "core/session/ort_apis.h"
 
-#ifdef USE_CUDA
+#if defined(USE_CUDA) || defined(USE_CUDA_PROVIDER_INTERFACE)
 #include "core/providers/cuda/cuda_provider_factory.h"
 #endif
 
 namespace onnxruntime {
 
-#ifdef USE_CUDA
+#if defined(USE_CUDA) || defined(USE_CUDA_PROVIDER_INTERFACE)
 ProviderInfo_CUDA* TryGetProviderInfo_CUDA();
 #endif
 
@@ -53,12 +53,12 @@ void LoraAdapter::MemoryMap(const std::filesystem::path& file_path) {
 static std::unique_ptr<IDataTransfer> GetDataTransfer(const OrtMemoryInfo& mem_info) {
   std::unique_ptr<IDataTransfer> data_transfer;
 
-  if (strcmp(mem_info.name, onnxruntime::CPU) == 0) {
+  if (mem_info.device.Type() == OrtDevice::CPU) {
     return data_transfer;
   }
 
-  if (strcmp(mem_info.name, onnxruntime::CUDA) == 0) {
-#ifdef USE_CUDA
+  if (mem_info.device.Type() == OrtDevice::GPU && mem_info.device.Vendor() == OrtDevice::VendorIds::NVIDIA) {
+#if defined(USE_CUDA) || defined(USE_CUDA_PROVIDER_INTERFACE)
     auto* cuda_provider_info = TryGetProviderInfo_CUDA();
     if (cuda_provider_info != nullptr) {
       data_transfer = cuda_provider_info->CreateGPUDataTransfer();

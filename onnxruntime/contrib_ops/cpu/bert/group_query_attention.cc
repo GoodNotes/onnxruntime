@@ -52,6 +52,9 @@ Status GroupQueryAttention<T>::Compute(OpKernelContext* context) const {
   const Tensor* total_seqlen_tensor = context->Input<Tensor>(6);
   const Tensor* cos_cache = context->Input<Tensor>(7);
   const Tensor* sin_cache = context->Input<Tensor>(8);
+  const Tensor* position_ids = context->Input<Tensor>(9);
+  const Tensor* attention_bias = context->Input<Tensor>(10);
+  const Tensor* head_sink = context->Input<Tensor>(11);
 
   GroupQueryAttentionParameters parameters = {};
   ORT_RETURN_IF_ERROR(group_query_attention_helper::CheckInputs(query,
@@ -67,12 +70,35 @@ Status GroupQueryAttention<T>::Compute(OpKernelContext* context) const {
                                                                 seqlens_k,
                                                                 total_seqlen_tensor,
                                                                 scale_,
-                                                                softcap_));
+                                                                softcap_,
+                                                                0));
+
+  ORT_RETURN_IF_ERROR(group_query_attention_helper::CheckCustomAttentionInputs(position_ids,
+                                                                               attention_bias,
+                                                                               head_sink,
+                                                                               parameters));
 
   const int batch_size = parameters.batch_size;
   const int sequence_length = parameters.sequence_length;
   const int present_kv_seqlen = parameters.seqlen_present_kv_cache;
   int head_size = parameters.head_size;
+
+  // Validate seqlens_k values before they are used as GEMM dimensions to prevent OOB access.
+  {
+    const int32_t* seqlens_k_data = seqlens_k->Data<int32_t>();
+    for (int b = 0; b < batch_size; b++) {
+      if (seqlens_k_data[b] < 0 || seqlens_k_data[b] >= present_kv_seqlen) {
+        return ORT_MAKE_STATUS(ONNXRUNTIME, INVALID_ARGUMENT,
+                               "seqlens_k[", b, "] = ", seqlens_k_data[b],
+                               " is out of range [0, ", present_kv_seqlen, ")");
+      }
+      if (!parameters.is_first_prompt && static_cast<int64_t>(seqlens_k_data[b]) + 1 < sequence_length) {
+        return ORT_MAKE_STATUS(ONNXRUNTIME, INVALID_ARGUMENT,
+                               "seqlens_k[", b, "] = ", seqlens_k_data[b],
+                               " is too small for sequence_length ", sequence_length);
+      }
+    }
+  }
   int q_hidden_size = parameters.hidden_size;
   const bool packed_qkv = parameters.is_packed_qkv;
 
@@ -87,6 +113,11 @@ Status GroupQueryAttention<T>::Compute(OpKernelContext* context) const {
   Tensor* present_k = context->Output(1, present_k_shape);
   Tensor* present_v = context->Output(2, present_v_shape);
 
+  std::vector<int64_t> output_qk_shape{static_cast<int64_t>(batch_size), static_cast<int64_t>(num_heads_), static_cast<int64_t>(parameters.sequence_length), static_cast<int64_t>(parameters.total_sequence_length)};
+  Tensor* output_qk = context->Output(3, output_qk_shape);
+
+  ORT_RETURN_IF_ERROR(group_query_attention_helper::CheckOutputs(output_qk, qk_output_));
+
   AllocatorPtr allocator;
   ORT_RETURN_IF_ERROR(context->GetTempSpaceAllocator(&allocator));
 
@@ -94,6 +125,7 @@ Status GroupQueryAttention<T>::Compute(OpKernelContext* context) const {
   OrtValue Q;
   OrtValue K;
   OrtValue V;
+  const int kv_sequence_length = parameters.kv_sequence_length;
   if (packed_qkv) {
     ORT_RETURN_IF_ERROR(MaybeTransposeToBNSH<T>(
         allocator, batch_size, num_heads_ + 2 * kv_num_heads_, sequence_length, head_size, query, Q));
@@ -101,9 +133,9 @@ Status GroupQueryAttention<T>::Compute(OpKernelContext* context) const {
     ORT_RETURN_IF_ERROR(MaybeTransposeToBNSH<T>(
         allocator, batch_size, num_heads_, sequence_length, head_size, query, Q));
     ORT_RETURN_IF_ERROR(MaybeTransposeToBNSH<T>(
-        allocator, batch_size, kv_num_heads_, sequence_length, head_size, key, K));
+        allocator, batch_size, kv_num_heads_, kv_sequence_length, head_size, key, K));
     ORT_RETURN_IF_ERROR(MaybeTransposeToBNSH<T>(
-        allocator, batch_size, kv_num_heads_, sequence_length, head_size, value, V));
+        allocator, batch_size, kv_num_heads_, kv_sequence_length, head_size, value, V));
   }
 
   OrtValue RotaryQKV;
@@ -112,6 +144,8 @@ Status GroupQueryAttention<T>::Compute(OpKernelContext* context) const {
   T* q_rotary = Q.GetMutable<Tensor>()->MutableData<T>();
   T* k_rotary = packed_qkv ? nullptr : K.GetMutable<Tensor>()->MutableData<T>();
   if (do_rotary_) {
+    // When kv_sequence_length == 0 (shared KV), only Q needs RoPE — K is skipped below.
+    ORT_ENFORCE(cos_cache != nullptr && sin_cache != nullptr, "cos_cache and sin_cache must be provided when do_rotary is true");
     // Initialize rotary parameters
     rotary_embedding_helper::RotaryParameters rotary_params = {};
     rotary_params.batch_size = batch_size;
@@ -120,7 +154,7 @@ Status GroupQueryAttention<T>::Compute(OpKernelContext* context) const {
     rotary_params.head_size = head_size;
     rotary_params.rotary_embedding_dim = parameters.rotary_dim;
     rotary_params.num_heads = num_heads_;
-    rotary_params.max_sequence_length = sequence_length;  // unused
+    rotary_params.max_sequence_length = static_cast<int>(cos_cache->Shape().GetDims()[0]);
     rotary_params.seq_stride = head_size;
     rotary_params.head_stride = sequence_length * rotary_params.seq_stride;
     rotary_params.batch_stride = (packed_qkv ? (num_heads_ + 2 * kv_num_heads_) : num_heads_) * rotary_params.head_stride;
@@ -129,9 +163,13 @@ Status GroupQueryAttention<T>::Compute(OpKernelContext* context) const {
     auto* tp = context->GetOperatorThreadPool();
     // Generate position ids
     const int pos_ids_size = parameters.is_first_prompt ? 1 : batch_size * sequence_length;
-    std::vector<int64_t> pos_ids(pos_ids_size);
-    if (parameters.is_first_prompt) {
-      pos_ids[0] = static_cast<int64_t>(0);
+    std::vector<int64_t> default_pos_ids(pos_ids_size);
+    const int64_t* pos_ids_data = default_pos_ids.data();
+
+    if (position_ids != nullptr) {
+      pos_ids_data = position_ids->Data<int64_t>();
+    } else if (parameters.is_first_prompt) {
+      default_pos_ids[0] = static_cast<int64_t>(0);
     } else {
       // Note: As of now, continuous decoding supports only batch size 1 and token generation supports only sequence length 1.
       for (int b = 0; b < batch_size; b++) {
@@ -139,13 +177,14 @@ Status GroupQueryAttention<T>::Compute(OpKernelContext* context) const {
         const int past_seqlen = total_seqlen - sequence_length;
         for (int s = 0; s < sequence_length; s++) {
           if (past_seqlen + s < total_seqlen) {
-            pos_ids[b * sequence_length + s] = static_cast<int64_t>(past_seqlen) + s;
+            default_pos_ids[b * sequence_length + s] = static_cast<int64_t>(past_seqlen) + s;
           } else {
-            pos_ids[b * sequence_length + s] = static_cast<int64_t>(1);
+            default_pos_ids[b * sequence_length + s] = static_cast<int64_t>(1);
           }
         }
       }
     }
+
     // Initialize separate buffers for rotary embeddings
     const T* q_input;
     const T* k_input;
@@ -163,19 +202,22 @@ Status GroupQueryAttention<T>::Compute(OpKernelContext* context) const {
       q_rotary = RotaryQ.GetMutable<Tensor>()->MutableData<T>();
       k_rotary = RotaryK.GetMutable<Tensor>()->MutableData<T>();
     }
-    // Run rotary embedding for Q and K
+    // Run rotary embedding for Q
     ORT_RETURN_IF_ERROR(RunRotaryEmbedding<T>(tp, rotary_params, q_input,
-                                              pos_ids.data(), cos_cache->Data<T>(),
+                                              pos_ids_data, cos_cache->Data<T>(),
                                               sin_cache->Data<T>(), q_rotary, rotary_interleaved_));
 
-    rotary_params.num_heads = kv_num_heads_;
-    rotary_params.hidden_size = parameters.kv_hidden_size;
-    if (!packed_qkv) {
-      rotary_params.batch_stride = kv_num_heads_ * rotary_params.head_stride;
+    // Run rotary embedding for K (skip when kv_sequence_length == 0, i.e. shared KV with no new tokens)
+    if (kv_sequence_length > 0) {
+      rotary_params.num_heads = kv_num_heads_;
+      rotary_params.hidden_size = parameters.kv_hidden_size;
+      if (!packed_qkv) {
+        rotary_params.batch_stride = kv_num_heads_ * rotary_params.head_stride;
+      }
+      ORT_RETURN_IF_ERROR(RunRotaryEmbedding<T>(tp, rotary_params, k_input,
+                                                pos_ids_data, cos_cache->Data<T>(),
+                                                sin_cache->Data<T>(), k_rotary, rotary_interleaved_));
     }
-    ORT_RETURN_IF_ERROR(RunRotaryEmbedding<T>(tp, rotary_params, k_input,
-                                              pos_ids.data(), cos_cache->Data<T>(),
-                                              sin_cache->Data<T>(), k_rotary, rotary_interleaved_));
     // Pack V into rotary QKV buffer
     if (packed_qkv) {
       const T* v_input = k_input + kv_num_heads_ * sequence_length * head_size;
@@ -192,10 +234,15 @@ Status GroupQueryAttention<T>::Compute(OpKernelContext* context) const {
   }
 
   ORT_RETURN_IF_ERROR(context->GetTempSpaceAllocator(&allocator));
+
+  const T* head_sink_data = (head_sink != nullptr) ? head_sink->Data<T>() : nullptr;
+
   // Compute the attention score and apply the score to V
-  return ApplyAttention(q_rotary, packed_qkv ? nullptr : k_rotary, packed_qkv ? nullptr : V.Get<Tensor>().Data<T>(),
-                        past_key, past_value, output, present_k, present_v,
-                        seqlens_k, parameters, allocator, context);
+  const T* k_data = packed_qkv ? nullptr : k_rotary;
+  const T* v_data = packed_qkv ? nullptr : V.Get<Tensor>().Data<T>();
+  return ApplyAttention(q_rotary, k_data, v_data,
+                        head_sink_data, attention_bias, past_key, past_value, output, present_k, present_v,
+                        output_qk, seqlens_k, parameters, allocator, context);
 }
 }  // namespace contrib
 }  // namespace onnxruntime

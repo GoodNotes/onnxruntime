@@ -32,14 +32,6 @@
 
 namespace onnxruntime {
 namespace utils {
-void* DefaultAlloc(size_t size) {
-  return onnxruntime::AllocatorDefaultAlloc(size);
-}
-
-void DefaultFree(void* p) {
-  onnxruntime::AllocatorDefaultFree(p);
-}
-
 void ConstructStrings(void* p_data, int64_t elements) {
   auto* ptr = static_cast<std::string*>(p_data);
   for (int64_t i = 0; i < elements; ++i) {
@@ -54,22 +46,13 @@ void DestroyStrings(void* p_data, int64_t elements) {
     ptr[i].~string();
 }
 
-bool ProviderIsCpuBased(const std::string& provider_type) {
-  return provider_type == onnxruntime::kCpuExecutionProvider ||
-         provider_type == onnxruntime::kDnnlExecutionProvider ||
-         provider_type == onnxruntime::kVitisAIExecutionProvider ||
-         provider_type == onnxruntime::kOpenVINOExecutionProvider ||
-         provider_type == onnxruntime::kNnapiExecutionProvider ||
-         provider_type == onnxruntime::kVSINPUExecutionProvider ||
-         provider_type == onnxruntime::kAclExecutionProvider ||
-         provider_type == onnxruntime::kArmNNExecutionProvider ||
-         provider_type == onnxruntime::kRknpuExecutionProvider ||
-         provider_type == onnxruntime::kCoreMLExecutionProvider ||
-         provider_type == onnxruntime::kSnpeExecutionProvider ||
-         provider_type == onnxruntime::kQnnExecutionProvider ||
-         provider_type == onnxruntime::kXnnpackExecutionProvider ||
-         provider_type == onnxruntime::kAzureExecutionProvider ||
-         provider_type == onnxruntime::utils::kInternalTestingExecutionProvider;
+bool ProviderIsCpuBased(const IExecutionProvider& provider) {
+  return provider.GetDevice().Type() == OrtDevice::CPU;
+}
+
+bool IsMemcpyNode(const Node& node) {
+  return node.Domain() == kOnnxDomain &&
+         (node.OpType() == "MemcpyFromHost" || node.OpType() == "MemcpyToHost");
 }
 
 static common::Status AllocateHelper(const AllocatorPtr& allocator,
@@ -82,28 +65,21 @@ static common::Status AllocateHelper(const AllocatorPtr& allocator,
 
   if (source_mlvalue.IsTensor()) {
     const Tensor& source_tensor = source_mlvalue.Get<Tensor>();
-    if (allocator->Info().alloc_type == OrtArenaAllocator) {
-      void* p_data = nullptr;
-#ifdef ORT_ENABLE_STREAM
-      BFCArena* arena_ptr = static_cast<BFCArena*>(allocator.get());
-      auto* stream_aware_alloc = StreamAwareArena::FromBFCArena(*arena_ptr);
-      if (stream_aware_alloc && target_stream) {
-        size_t len = Tensor::CalculateTensorStorageSize(source_tensor.DataType(), source_tensor.Shape());
-        p_data = stream_aware_alloc->AllocOnStream(len, target_stream, nullptr);
+    void* p_data = nullptr;
+    if (target_stream && allocator->IsStreamAware()) {
+      size_t len = Tensor::CalculateTensorStorageSize(source_tensor.DataType(), source_tensor.Shape());
+      p_data = allocator->AllocOnStream(len, target_stream);
+      if (p_data == nullptr && len > 0) {
+        return ORT_MAKE_STATUS(ONNXRUNTIME, FAIL, "Allocation failed.");
       }
-#else
-      ORT_UNUSED_PARAMETER(target_stream);
-#endif  // ORT_ENABLE_STREAM
-      if (p_data == nullptr) {
-        Tensor::InitOrtValue(source_tensor.DataType(),
-                             source_tensor.Shape(),
-                             allocator, target_mlvalue);
-      } else {
-        Tensor::InitOrtValue(source_tensor.DataType(),
-                             source_tensor.Shape(),
-                             p_data,
-                             allocator, target_mlvalue);
-      }
+    }
+
+    if (p_data) {
+      Tensor::InitOrtValue(source_tensor.DataType(),
+                           source_tensor.Shape(),
+                           p_data,
+                           allocator, target_mlvalue);
+
     } else {
       Tensor::InitOrtValue(source_tensor.DataType(),
                            source_tensor.Shape(),
@@ -225,7 +201,7 @@ static Status BatchOrCopyMLValue(const SessionState& session_state,
 
 static bool HaveCpuExecutionProvidersOnly(const ExecutionProviders& execution_providers) {
   for (const auto& execution_provider : execution_providers) {
-    if (!ProviderIsCpuBased(execution_provider->Type())) {
+    if (!ProviderIsCpuBased(*execution_provider)) {
       return false;
     }
   }
@@ -564,7 +540,7 @@ common::Status CopyOneInputAcrossDevices(const SessionState& session_state, cons
     size_t num_streams = device_stream_collection->NumStreams();
     for (size_t i = 0; i < num_streams; i++) {
       Stream* stream = device_stream_collection->GetStream(i);
-      if (stream && stream->GetDevice().Type() != OrtDevice::CPU) {
+      if (stream && !stream->GetDevice().UsesCpuMemory()) {
         device_stream = stream;
         break;
       }
@@ -623,7 +599,8 @@ ExecuteGraphImpl(const SessionState& session_state,
                  DeviceStreamCollection* device_stream_collection,
 #endif
                  const bool only_execute_path_to_fetches = false,
-                 Stream* parent_stream = nullptr) {
+                 Stream* parent_stream = nullptr,
+                 profiling::Profiler* run_profiler = nullptr) {
   const auto& feeds_fetches_info = feeds_fetches_manager.GetFeedsFetchesInfo();
   const auto& device_copy_checks = feeds_fetches_manager.GetDeviceCopyChecks();
 #ifdef ORT_ENABLE_STREAM
@@ -655,7 +632,8 @@ ExecuteGraphImpl(const SessionState& session_state,
                                   terminate_flag,
                                   only_execute_path_to_fetches,
                                   // single thread mode
-                                  single_thread_mode));
+                                  single_thread_mode,
+                                  run_profiler));
     ORT_RETURN_IF_ERROR(status);
   } else {
     auto feeds_to_use = feeds;
@@ -703,7 +681,8 @@ ExecuteGraphImpl(const SessionState& session_state,
 #endif
                                   terminate_flag,
                                   only_execute_path_to_fetches,
-                                  single_thread_mode));
+                                  single_thread_mode,
+                                  run_profiler));
     ORT_RETURN_IF_ERROR(status);
     InlinedVector<Stream*> fetches_streams;
     fetches_streams.reserve(feeds_fetches_info.fetches_mlvalue_idxs.size());
@@ -741,7 +720,8 @@ common::Status ExecuteGraph(const SessionState& session_state,
                             DeviceStreamCollectionHolder& device_stream_collection_holder,
 #endif
                             bool only_execute_path_to_fetches,
-                            Stream* parent_stream) {
+                            Stream* parent_stream,
+                            profiling::Profiler* run_profiler) {
   ORT_RETURN_IF_ERROR(utils::InitializeFeedFetchCopyInfo(session_state, feeds_fetches_manager));
 
   // finalize the copy info using the provided feeds and fetches. will update device_copy_checks in the background
@@ -752,13 +732,15 @@ common::Status ExecuteGraph(const SessionState& session_state,
                                  execution_mode, terminate_flag, logger,
                                  device_stream_collection,
                                  only_execute_path_to_fetches,
-                                 parent_stream);
+                                 parent_stream,
+                                 run_profiler);
   return retval;
 #else
   return ExecuteGraphImpl(session_state, feeds_fetches_manager, feeds, fetches, {},
                           execution_mode, terminate_flag, logger,
                           only_execute_path_to_fetches,
-                          parent_stream);
+                          parent_stream,
+                          run_profiler);
 #endif
 }
 
@@ -769,17 +751,16 @@ common::Status ExecuteGraph(const SessionState& session_state,
 #ifdef ORT_ENABLE_STREAM
                             DeviceStreamCollectionHolder& device_stream_collection_holder,
 #endif
-                            const logging::Logger& logger) {
-  return ExecuteGraph(session_state,
-                      feeds_fetches_manager,
-                      feeds, fetches,
-                      execution_mode,
-                      run_options.terminate,
-                      logger,
+                            const logging::Logger& logger,
+                            profiling::Profiler* run_profiler) {
+  return ExecuteGraph(session_state, feeds_fetches_manager, feeds, fetches,
+                      execution_mode, run_options.terminate, logger,
 #ifdef ORT_ENABLE_STREAM
                       device_stream_collection_holder,
 #endif
-                      run_options.only_execute_path_to_fetches);
+                      run_options.only_execute_path_to_fetches,
+                      nullptr /* parent_stream */,
+                      run_profiler);
 }
 
 #ifdef ENABLE_TRAINING
@@ -902,18 +883,21 @@ common::Status ExecuteSubgraph(const SessionState& session_state, const FeedsFet
                                const std::unordered_map<size_t, IExecutor::CustomAllocator>& fetch_allocators,
                                ExecutionMode execution_mode, const bool& terminate_flag, const logging::Logger& logger,
                                Stream* parent_stream,
-                               bool sync_subgraph_fetches) {
+                               bool sync_subgraph_fetches,
+                               profiling::Profiler* run_profiler) {
 #ifdef ORT_ENABLE_STREAM
   DeviceStreamCollectionHolder device_stream_collection_holder(&session_state);
   DeviceStreamCollection* device_stream_collection = device_stream_collection_holder.p_.get();
 
   auto retval = ExecuteGraphImpl(session_state, feeds_fetches_manager, feeds, fetches, fetch_allocators,
-                                 execution_mode, terminate_flag, logger, device_stream_collection, false, parent_stream);
+                                 execution_mode, terminate_flag, logger, device_stream_collection, false, parent_stream,
+                                 run_profiler);
   if (device_stream_collection)
     ORT_CHECK_AND_SET_RETVAL(device_stream_collection->CleanUp(false));
 #else
   auto retval = ExecuteGraphImpl(session_state, feeds_fetches_manager, feeds, fetches, fetch_allocators,
-                                 execution_mode, terminate_flag, logger, false, parent_stream);
+                                 execution_mode, terminate_flag, logger, false, parent_stream,
+                                 run_profiler);
 #endif
   if (retval.IsOK() && sync_subgraph_fetches && parent_stream) {
     parent_stream->Flush();
