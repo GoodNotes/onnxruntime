@@ -74,6 +74,25 @@ def _get_framework_headers_path(framework_dir):
     return os.path.join(framework_dir, "Headers")
 
 
+def _copy_static_headers(headers, header_dir):
+    """Copy headers for static XCFrameworks in both flat and namespaced layouts.
+
+    SwiftPM's ProcessXCFramework step copies static library headers into an `include`
+    directory. Goodnotes' Objective-C++ bindings include ORT headers as
+    `onnxruntime/<header>.h`, so we need a nested `onnxruntime/` directory to keep
+    archive builds working for static XCFramework consumers. We also keep the flat
+    layout for compatibility with existing consumers that include headers directly.
+    """
+
+    namespaced_header_dir = os.path.join(header_dir, "onnxruntime")
+    pathlib.Path(namespaced_header_dir).mkdir(parents=True, exist_ok=True)
+
+    for header in headers:
+        header_name = os.path.basename(header)
+        shutil.copy(header, os.path.join(header_dir, header_name))
+        shutil.copy(header, os.path.join(namespaced_header_dir, header_name))
+
+
 # Build fat framework for all archs of a single sysroot
 # For example, arm64 and x86_64 for iphonesimulator
 def _build_for_apple_sysroot(
@@ -176,8 +195,11 @@ def _build_for_apple_sysroot(
         shutil.copy(framework_info_path, bundle_root)
         pathlib.Path(header_dir).mkdir(parents=True, exist_ok=True)
 
-        for _header in headers:
-            shutil.copy(_header, header_dir)
+        if build_dynamic_framework:
+            for _header in headers:
+                shutil.copy(_header, header_dir)
+        else:
+            _copy_static_headers(headers, header_dir)
 
         # use lipo to create a fat ort library
         lipo_command = ["lipo", "-create"]
