@@ -38,15 +38,14 @@ jobs:
       - run:
           name: install tools for build
           command: |
-            brew install cmake
-            pip install -r ${CIRCLE_WORKING_DIRECTORY}/requirements-dev.txt
+            pip install -r ${CIRCLE_WORKING_DIRECTORY}/tools/ci_build/github/apple/ios_packaging/requirements.txt
       - run:
           name: build with build_apple_framework.py
           command: |
             export PYTHONPATH=${CIRCLE_WORKING_DIRECTORY}/tools/python:$PYTHONPATH
             python3 ${CIRCLE_WORKING_DIRECTORY}/tools/ci_build/github/apple/build_apple_framework.py --config Release --build_dynamic_framework  --build_dir=$HOME/onnxlibrary/macabi_release_v20230327_2320 \
               --include_ops_by_config=${CIRCLE_WORKING_DIRECTORY}/tools/ci_build/github/apple/hws_mobile_package.required_operators.config \
-              ${CIRCLE_WORKING_DIRECTORY}/tools/ci_build/github/apple/default_full_ios_framework_build_settings.json
+              ${CIRCLE_WORKING_DIRECTORY}/tools/ci_build/github/apple/goodnotes_maccatalyst_build_settings.json
 
       - run:
           name: archive the build results
