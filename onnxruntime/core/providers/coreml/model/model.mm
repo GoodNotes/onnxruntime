@@ -122,7 +122,12 @@ Status CreateInputFeatureProvider(const std::unordered_map<std::string, OnnxTens
         break;
       }
       case ONNX_NAMESPACE::TensorProto_DataType_FLOAT16: {
-        data_type = MLMultiArrayDataTypeFloat16;
+        if (HAS_COREML6_OR_LATER) {
+          data_type = MLMultiArrayDataTypeFloat16;
+        } else {
+          return ORT_MAKE_STATUS(ONNXRUNTIME, FAIL,
+                                 "Float16 MLMultiArray is not supported on this OS version (requires macCatalyst 16+)");
+        }
         break;
       }
       case ONNX_NAMESPACE::TensorProto_DataType_INT32: {
@@ -408,6 +413,8 @@ void ProfileComputePlan(NSURL* compileUrl, MLModelConfiguration* config) {
 
 void ConfigureOptimizationHints(MLModelConfiguration* config, const CoreMLOptions& coreml_options) {
 #if HAS_COREMLOPTIMIZATIONHINT
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wunguarded-availability-new"
   MLOptimizationHints* optimizationHints = [[MLOptimizationHints alloc] init];
   if (coreml_options.UseStrategy("FastPrediction")) {
     optimizationHints.specializationStrategy = MLSpecializationStrategyFastPrediction;
@@ -418,6 +425,7 @@ void ConfigureOptimizationHints(MLModelConfiguration* config, const CoreMLOption
   } else {
     // not set
   }
+#pragma clang diagnostic pop
 #endif
 }
 
@@ -573,7 +581,11 @@ Status Execution::LoadModel() {
       } else if (coreml_compute_unit & COREML_FLAG_USE_CPU_AND_GPU) {
         config.computeUnits = MLComputeUnitsCPUAndGPU;
       } else if (coreml_compute_unit & COREML_FLAG_ONLY_ENABLE_DEVICE_WITH_ANE) {
-        config.computeUnits = MLComputeUnitsCPUAndNeuralEngine;  // Apple Neural Engine
+        if (HAS_COREML6_OR_LATER) {
+          config.computeUnits = MLComputeUnitsCPUAndNeuralEngine;  // Apple Neural Engine
+        } else {
+          config.computeUnits = MLComputeUnitsAll;
+        }
       } else {
         config.computeUnits = MLComputeUnitsAll;
       }

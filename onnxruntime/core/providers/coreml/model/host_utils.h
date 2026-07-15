@@ -36,12 +36,12 @@
 
 // https://developer.apple.com/documentation/swift/marking-api-availability-in-objective-c
 // API_AVAILABLE is used to decorate Objective-C APIs
-#define API_AVAILABLE_COREML3 API_AVAILABLE(macos(10.15), ios(13))
-#define API_AVAILABLE_COREML4 API_AVAILABLE(macos(11), ios(14))
-#define API_AVAILABLE_COREML5 API_AVAILABLE(macos(12), ios(15))
-#define API_AVAILABLE_COREML6 API_AVAILABLE(macos(13), ios(16))
-#define API_AVAILABLE_COREML7 API_AVAILABLE(macos(14), ios(17))
-#define API_AVAILABLE_COREML8 API_AVAILABLE(macos(15), ios(18))
+#define API_AVAILABLE_COREML3 API_AVAILABLE(macos(10.15), ios(13), maccatalyst(13))
+#define API_AVAILABLE_COREML4 API_AVAILABLE(macos(11), ios(14), maccatalyst(14))
+#define API_AVAILABLE_COREML5 API_AVAILABLE(macos(12), ios(15), maccatalyst(15))
+#define API_AVAILABLE_COREML6 API_AVAILABLE(macos(13), ios(16), maccatalyst(16))
+#define API_AVAILABLE_COREML7 API_AVAILABLE(macos(14), ios(17), maccatalyst(17))
+#define API_AVAILABLE_COREML8 API_AVAILABLE(macos(15), ios(18), maccatalyst(18))
 
 // The previous macros are used in header files to declare the availability of the APIs.
 // The following macros are used in  build time checks to determine if the APIs are available.
@@ -51,12 +51,12 @@
 
 // @available is used in implementation code to check the availability of the APIs at runtime.
 // Base required OS to run CoreML Specification Version 4 (Core ML 3)
-#define HAS_COREML3_OR_LATER @available(macOS 10.15, iOS 13, *)
-#define HAS_COREML4_OR_LATER @available(macOS 11, iOS 14, *)
-#define HAS_COREML5_OR_LATER @available(macOS 12, iOS 15, *)
-#define HAS_COREML6_OR_LATER @available(macOS 13, iOS 16, *)
-#define HAS_COREML7_OR_LATER @available(macOS 14, iOS 17, *)
-#define HAS_COREML8_OR_LATER @available(macOS 15, iOS 18, *)
+#define HAS_COREML3_OR_LATER @available(macOS 10.15, iOS 13, macCatalyst 13, *)
+#define HAS_COREML4_OR_LATER @available(macOS 11, iOS 14, macCatalyst 14, *)
+#define HAS_COREML5_OR_LATER @available(macOS 12, iOS 15, macCatalyst 15, *)
+#define HAS_COREML6_OR_LATER @available(macOS 13, iOS 16, macCatalyst 16, *)
+#define HAS_COREML7_OR_LATER @available(macOS 14, iOS 17, macCatalyst 17, *)
+#define HAS_COREML8_OR_LATER @available(macOS 15, iOS 18, macCatalyst 18, *)
 
 #endif
 
