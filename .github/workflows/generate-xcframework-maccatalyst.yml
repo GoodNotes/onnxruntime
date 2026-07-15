@@ -97,6 +97,9 @@ jobs:
       # When syncing upstream, check if default_full_ios_framework_build_settings.json
       # changed (e.g. new platforms, updated deploy targets, new flags) and mirror
       # those changes here, preserving the GoodNotes-specific additions:
+      #   - base: CMAKE_POLICY_VERSION_MINIMUM=3.5
+      #     (GitHub runners have CMake 4.x from Homebrew; some transitive deps such as
+      #     psimd have cmake_minimum_required < 3.5 which CMake 4 rejects without this)
       #   - macabi: FETCHCONTENT_TRY_FIND_PACKAGE_MODE=NEVER
       #     (prevents CMake from using incompatible Homebrew packages on GitHub runners)
       - name: create ${{ matrix.variant }} release build
