@@ -87,6 +87,15 @@ def _find_or_build_sysroot_arch_framework(
         ),
     )
 
+    # Dynamic macabi builds use a Ninja/Make CMake generator (Xcode is unsupported
+    # for Catalyst). Without the Xcode generator, CMake does not place the framework
+    # under the <config>-<sysroot> subdirectory — it lands directly under the config
+    # build dir. Fall back to that path when the expected one does not exist.
+    if build_dynamic_framework and sysroot == "macabi" and not framework_dir.exists():
+        fallback = build_dir_current_arch / build_config / "onnxruntime.framework"
+        if fallback.exists():
+            framework_dir = fallback
+
     info_plist_file = build_dir_current_arch / build_config / "Info.plist"
     framework_info_file = build_dir_current_arch / build_config / "framework_info.json"
 
