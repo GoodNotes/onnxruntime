@@ -90,6 +90,15 @@ jobs:
       #       --include_ops_by_config=${{ github.workspace }}/tools/ci_build/github/apple/hws_mobile_package.required_operators.config \
       #       --path_to_protoc_exe=/usr/local/bin/protoc-3.21.12.0 ${{ github.workspace }}/tools/ci_build/github/apple/hws_mobile_package.required_operators.config
 
+      # goodnotes_maccatalyst_build_settings.json is a GoodNotes-owned file that
+      # extends the upstream default_full_ios_framework_build_settings.json.
+      # It is kept separate to avoid merge conflicts on every upstream sync.
+      #
+      # When syncing upstream, check if default_full_ios_framework_build_settings.json
+      # changed (e.g. new platforms, updated deploy targets, new flags) and mirror
+      # those changes here, preserving the GoodNotes-specific additions:
+      #   - macabi: FETCHCONTENT_TRY_FIND_PACKAGE_MODE=NEVER
+      #     (prevents CMake from using incompatible Homebrew packages on GitHub runners)
       - name: create ${{ matrix.variant }} release build
         shell: bash
         run: |
