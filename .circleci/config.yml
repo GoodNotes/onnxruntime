@@ -38,6 +38,7 @@ jobs:
       - run:
           name: install tools for build
           command: |
+            brew install cmake
             pip install -r ${CIRCLE_WORKING_DIRECTORY}/tools/ci_build/github/apple/ios_packaging/requirements.txt
       - run:
           name: build with build_apple_framework.py
