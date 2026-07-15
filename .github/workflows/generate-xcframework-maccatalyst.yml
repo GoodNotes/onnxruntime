@@ -122,6 +122,14 @@ jobs:
             sleep $((attempt * 30))
           done
 
+      - name: upload build error logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-error-logs-${{ matrix.variant }}
+          path: ${{ env.HOME }}/onnxlibrary/${{ matrix.build_dir_name }}/intermediates/**/CMakeFiles/CMake*.log
+          if-no-files-found: ignore
+
       - name: archive ${{ matrix.variant }} xcframework
         shell: bash
         run: |
