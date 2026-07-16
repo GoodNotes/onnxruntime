@@ -26,17 +26,17 @@
             "--ios",
             "--use_xcode",
             "--use_xnnpack",
-            "--apple_deploy_target=15.1"
+            "--apple_deploy_target=18.6"
         ],
         "iphonesimulator": [
             "--ios",
             "--use_xcode",
             "--use_xnnpack",
-            "--apple_deploy_target=15.1"
+            "--apple_deploy_target=18.6"
         ],
         "macabi": [
             "--macos=Catalyst",
-            "--apple_deploy_target=14.0",
+            "--apple_deploy_target=18.6",
             "--cmake_extra_defines=FETCHCONTENT_TRY_FIND_PACKAGE_MODE=NEVER"
         ]
     }
